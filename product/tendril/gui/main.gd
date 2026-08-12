@@ -360,8 +360,8 @@ func _on_monitor_created(result, response_code, headers, body):
 			"target_port_name": "text_in",
 			"semantic_type": "narrative_context"
 		})
-		var headers = ["Content-Type: application/json"]
-		_http_edge.request(BACKEND_URL + "/edges", headers, HTTPClient.METHOD_POST, edge_body)
+		var req_headers = ["Content-Type: application/json"]
+		_http_edge.request(BACKEND_URL + "/edges", req_headers, HTTPClient.METHOD_POST, edge_body)
 
 
 func _show_cook_dialog(text: String):
