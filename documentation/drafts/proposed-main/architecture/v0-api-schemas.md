@@ -1,0 +1,308 @@
+# Tendril V0 Backend API Schemas
+
+Status: PROPOSED
+Plan Phase: P9 — Tendril Version Zero Headless Runtime
+Source Task: close-p3-define-v0-api-schemas
+
+## Purpose
+
+Define the minimal JSON schemas and REST endpoints for the V0 Tendril headless runtime backend. These schemas cover the three core entities — Nodes, Edges, and ContextPackets — plus the endpoints needed to create/read them and trigger context compilation.
+
+Semantics come first. The backend must be functionally usable without a GUI.
+
+---
+
+## Core Entities
+
+### Node
+
+A Node is the fundamental unit of content in the Tendril graph.
+
+```json
+{
+  "id": "<uuid>",
+  "type": "text | file",
+  "content": "<string>",
+  "metadata": {
+    "label": "<string>",
+    "created_at": "<ISO-8601 UTC>",
+    "updated_at": "<ISO-8601 UTC>",
+    "tags": ["<string>"]
+  }
+}
+```
+
+Fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | string (UUID) | yes | Unique node identifier |
+| `type` | enum: `text`, `file` | yes | Node kind — inline text or file reference |
+| `content` | string | yes | Raw content (text body or file path) |
+| `metadata` | object | yes | Node metadata |
+| `metadata.label` | string | yes | Human-readable label |
+| `metadata.created_at` | string (ISO-8601 UTC) | yes | Creation timestamp |
+| `metadata.updated_at` | string (ISO-8601 UTC) | yes | Last modification timestamp |
+| `metadata.tags` | array of string | no | Arbitrary tags |
+
+`type` semantics:
+
+- `text`: `content` is inline text.
+- `file`: `content` is a filesystem path relative to the project root.
+
+---
+
+### Edge
+
+An Edge is a directed relationship between two Nodes.
+
+```json
+{
+  "id": "<uuid>",
+  "source_id": "<uuid>",
+  "target_id": "<uuid>",
+  "semantic_type": "<string>",
+  "metadata": {
+    "created_at": "<ISO-8601 UTC>"
+  }
+}
+```
+
+Fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | string (UUID) | yes | Unique edge identifier |
+| `source_id` | string (UUID) | yes | Source node ID |
+| `target_id` | string (UUID) | yes | Target node ID |
+| `semantic_type` | string | yes | Label for the relationship semantics |
+| `metadata` | object | yes | Edge metadata |
+| `metadata.created_at` | string (ISO-8601 UTC) | yes | Creation timestamp |
+
+`semantic_type` direction convention:
+
+An edge from A to B with type X means "A X B". For example:
+
+- `context_for`: source provides context for target.
+- `critiques`: source critiques target.
+- `extends`: source extends or builds upon target.
+- `refines`: source refines target.
+- `references`: source references target.
+
+The semantic_type vocabulary is open. The backend stores the label; the human and/or future compilers assign meaning.
+
+---
+
+### ContextPacket
+
+A ContextPacket is the compiled contextual envelope produced by the Context Compiler endpoint. It bundles a target node with the concatenated upstream content needed for its semantic context.
+
+```json
+{
+  "target_node_id": "<uuid>",
+  "compiled_content": "<string>",
+  "upstream_node_ids": ["<uuid>"]
+}
+```
+
+Fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `target_node_id` | string (UUID) | yes | The node for which context was compiled |
+| `compiled_content` | string | yes | Upstream content concatenated as a single string |
+| `upstream_node_ids` | array of string (UUID) | yes | IDs of all upstream nodes included (ordered by traversal) |
+
+Compilation is recursive and deterministic:
+
+1. Start from `target_node_id`.
+2. Walk inbound edges (where `target_id` matches the current node).
+3. For each source node, prepend its content (with a header separator identifying the node label).
+4. Recurse into each source node's own inbound edges.
+5. Detect cycles: each node appears at most once. On re-encounter, include a reference line instead of recursing.
+6. Order: breadth-first, then by node creation timestamp within each level.
+
+---
+
+## REST Endpoints
+
+Base path: `/api/v0`
+
+All request and response bodies are JSON. Timestamps are ISO-8601 UTC.
+
+### Nodes
+
+#### POST /api/v0/nodes
+
+Create a new node.
+
+Request body:
+```json
+{
+  "type": "text",
+  "content": "Hello, Tendril.",
+  "label": "greeting",
+  "tags": ["example"]
+}
+```
+
+Response (201 Created):
+```json
+{
+  "id": "<uuid>",
+  "type": "text",
+  "content": "Hello, Tendril.",
+  "metadata": {
+    "label": "greeting",
+    "created_at": "2026-08-12T07:00:00Z",
+    "updated_at": "2026-08-12T07:00:00Z",
+    "tags": ["example"]
+  }
+}
+```
+
+#### GET /api/v0/nodes
+
+List all nodes.
+
+Response (200 OK):
+```json
+{
+  "nodes": [ "<node>", "<node>" ]
+}
+```
+
+#### GET /api/v0/nodes/:id
+
+Get a single node by ID.
+
+Response (200 OK): `<node>`
+Response (404): `{ "error": "node not found" }`
+
+#### PATCH /api/v0/nodes/:id
+
+Update node content and/or label.
+
+Request body (all fields optional):
+```json
+{
+  "content": "Updated content.",
+  "label": "new-label",
+  "tags": ["tag1", "tag2"]
+}
+```
+
+Response (200 OK): `<updated node>`
+
+#### DELETE /api/v0/nodes/:id
+
+Delete a node and all edges referencing it.
+
+Response (204 No Content)
+
+---
+
+### Edges
+
+#### POST /api/v0/edges
+
+Create a new edge.
+
+Request body:
+```json
+{
+  "source_id": "<uuid>",
+  "target_id": "<uuid>",
+  "semantic_type": "context_for"
+}
+```
+
+Response (201 Created): `<edge>`
+
+Validation:
+- Both `source_id` and `target_id` must reference existing nodes.
+- Returns 400 if a referenced node does not exist.
+- Returns 409 if an edge with the same `source_id`, `target_id`, and `semantic_type` already exists.
+
+#### GET /api/v0/edges
+
+List all edges.
+
+Response (200 OK):
+```json
+{
+  "edges": [ "<edge>", "<edge>" ]
+}
+```
+
+#### GET /api/v0/edges/:id
+
+Get a single edge by ID.
+
+Response (200 OK): `<edge>`
+Response (404): `{ "error": "edge not found" }`
+
+#### DELETE /api/v0/edges/:id
+
+Delete an edge.
+
+Response (204 No Content)
+
+#### GET /api/v0/nodes/:id/edges
+
+Get all edges connected to a node (both inbound and outbound).
+
+Response (200 OK):
+```json
+{
+  "node_id": "<uuid>",
+  "inbound": [ "<edge>" ],
+  "outbound": [ "<edge>" ]
+}
+```
+
+---
+
+### Context Compilation
+
+#### POST /api/v0/compile
+
+Trigger deterministic context compilation for a target node.
+
+Request body:
+```json
+{
+  "target_node_id": "<uuid>"
+}
+```
+
+Response (200 OK): `<ContextPacket>`
+Response (404): `{ "error": "node not found" }`
+
+The compiled_content format uses node labels as section headers:
+
+```
+=== context_node_label ===
+content of context node
+
+=== another_context_label ===
+content of another node
+
+=== cycle: cycle_node_label ===
+(already included upstream)
+
+=== <target_node_label> ===
+target node content
+```
+
+The target node's own content appears last. Upstream nodes appear in breadth-first order (closest first), with nodes at equal depth ordered by creation timestamp.
+
+---
+
+## Implementation Notes
+
+1. **Storage**: In-memory is acceptable for V0. Persistence layer can be added later.
+2. **Transport**: HTTP/1.1, localhost only for V0. No TLS required.
+3. **Authentication**: None for V0. Single-user local development.
+4. **Concurrency**: Single-threaded request handling is acceptable for V0.
+5. **Content size**: No arbitrary limits for V0, but the compiler should not recurse beyond a default maximum depth (e.g., 50) to prevent runaway compilation.

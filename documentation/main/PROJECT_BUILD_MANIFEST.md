@@ -46,7 +46,9 @@ A changed build direction becomes current only through explicit human authorizat
 
 ## 1a. V0 Product Pivot
 
-The immediate focus is building the minimal Tendril backend API and 3D GUI. The Ontological Agent Compiler (OAC) and automated orchestration are deferred. The system only needs to support a limited range of tasks to allow human-governed graph construction and context compilation.
+The immediate focus is building the minimal Tendril backend API and GUI. The Ontological Agent Compiler (OAC) and automated orchestration are deferred. The system only needs to support a limited range of tasks to allow human-governed graph construction and context compilation.
+
+Tech stack locked: Godot 4 (native client, V0 2D, V1 3D upgrade path) + Python FastAPI (headless DAG execution engine). See `documentation/drafts/proposed-main/architecture/tendril-v0-architecture.md` for the full V0 architecture and implementation plan.
 
 ---
 
@@ -300,7 +302,7 @@ Do not implement the full Harness during this phase.
 
 ## P3 — Git Baseline
 
-State: PLANNED
+State: COMPLETE
 
 Purpose:
 
@@ -522,22 +524,28 @@ Ordinary implementation agents must not become the authority that simultaneously
 
 ## P9 — Tendril Version Zero Headless Runtime
 
-State: PLANNED
+State: CURRENT
+
+Tech Stack: Python FastAPI (headless DAG execution engine)
 
 Purpose:
 
 Build the minimal viable graph backend for the V0 Tendril product.
 
-The backend must support:
+The backend is a functional DAG execution engine implementing:
 
-- Text Nodes
-- File Nodes
-- Edges
-- a deterministic Context Compiler endpoint to format upstream context
+- Operator-based node model (Text Source, File Source, Composite Text, Extraction, Compression, Monitor)
+- Named input/output ports with dynamic port registration
+- Recursive "cook" traversal with cycle detection
+- Semantic-aware template engine (narrative_context / RED, stable_reference / GREEN)
+- Immutable history with fork-based non-destructive editing (supersedes edges)
+- Position support (2D coordinates with z=0.0 for V0, 3D-ready data model)
 
 Backend semantics come first.
 
 Tendril must be functionally usable without the final GUI.
+
+Architecture: `documentation/drafts/proposed-main/architecture/tendril-v0-architecture.md`
 
 ---
 
@@ -545,25 +553,31 @@ Tendril must be functionally usable without the final GUI.
 
 State: PLANNED
 
+Tech Stack: Godot 4 (native client)
+
 Purpose:
 
-Build the minimal 3D GUI for V0.
+Build the minimal GUI for V0 (2D for V0, 3D upgrade path for V1).
 
-The GUI must support:
+The Godot 4 GUI uses native `Control` and `GraphEdit` systems and must support:
 
-- a 3D workspace
-- node spawning
-- inline text editing
-- noodle/edge drawing
+- infinite canvas panning/zooming
+- node spawning with inline `TextEdit` inputs
+- noodle/edge drawing with semantic visual styles (RED dashed, GREEN solid, supersedes metallic)
+- LOD strategy (cached thumbnails for zoomed-out nodes, heavy widgets only for focused nodes)
+- 2D canvas with semantic gravity (X: progression, Y: abstraction — canopy vs. ground)
 
 Target relationship:
 
 GUI action
+→ HTTPRequest
 → backend command
 → authoritative backend state
 → frontend render
 
-The frontend should not become a second semantic runtime.
+The GUI is strictly a projection of backend state. It holds no domain logic.
+
+The Godot 4 unified rendering pipeline allows swapping the 2D canvas for a 3D viewport (`Node3D`) in V1 without rewriting application logic or the backend API.
 
 ---
 
@@ -835,17 +849,21 @@ Current phase:
 
 V0 Product Pivot — minimal Tendril backend API and 3D GUI
 
+Completed:
+
+P3 — Git Baseline (COMPLETE)
+
 Current immediate objective:
 
-P3 — Git Baseline
+P9 — Tendril Version Zero Headless Runtime (minimal viable graph backend)
 
 Then:
-
-P9 — Tendril Version Zero Headless Runtime (minimal viable graph backend)
 
 P10 — Tendril Frontend (minimal 3D GUI)
 
 P4 — OpenWork Live Project State continues in parallel as manual operating practice.
+
+P8 — Trusted Verification and Git Integration will follow when needed.
 
 No later phase becomes the default focus until the human advances the manifest.
 
