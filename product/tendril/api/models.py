@@ -30,9 +30,10 @@ class NodeProperties(BaseModel):
 
 
 class Node(BaseModel):
-    id: str
+    id: str = ""
     type: NodeType
     is_locked: bool = False
+    content: str = ""
     position: Position3D = Field(default_factory=Position3D)
     inputs: list[Port] = Field(default_factory=list)
     outputs: list[Port] = Field(default_factory=list)
@@ -47,7 +48,7 @@ SemanticType = Literal[
 
 
 class Edge(BaseModel):
-    id: str
+    id: str = ""
     source_node_id: str
     source_port_name: str
     target_node_id: str
