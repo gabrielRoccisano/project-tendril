@@ -524,7 +524,7 @@ Ordinary implementation agents must not become the authority that simultaneously
 
 ## P9 — Tendril Version Zero Headless Runtime
 
-State: CURRENT
+State: COMPLETE
 
 Tech Stack: Python FastAPI (headless DAG execution engine)
 
@@ -541,17 +541,20 @@ The backend is a functional DAG execution engine implementing:
 - Immutable history with fork-based non-destructive editing (supersedes edges)
 - Position support (2D coordinates with z=0.0 for V0, 3D-ready data model)
 
-Backend semantics come first.
+Completed:
 
-Tendril must be functionally usable without the final GUI.
-
-Architecture: `documentation/drafts/proposed-main/architecture/tendril-v0-architecture.md`
+- FastAPI CRUD endpoints (nodes, edges)
+- Graph traversal and recursive cook engine with cycle detection
+- File source disk reading with error handling
+- GET /workspace endpoint returning full graph state
+- Fork-based non-destructive editing (supersedes edges)
+- Absolute import paths for uvicorn execution
 
 ---
 
 ## P10 — Tendril Frontend
 
-State: PLANNED
+State: CURRENT
 
 Tech Stack: Godot 4 (native client)
 
@@ -847,19 +850,18 @@ Progress increasingly means:
 
 Current phase:
 
-V0 Product Pivot — minimal Tendril backend API and 3D GUI
+P10 — V0 functional loop (spawn, edit, connect, cook, monitor, lock, fork) implemented. Next: persistence, semantic edge typing, composite nodes.
 
 Completed:
 
 P3 — Git Baseline (COMPLETE)
+P9 — Tendril Version Zero Headless Runtime (COMPLETE)
 
 Current immediate objective:
 
-P9 — Tendril Version Zero Headless Runtime (minimal viable graph backend)
+P10 — Tendril Frontend (Godot 4 GraphEdit GUI with full V0 functional loop)
 
 Then:
-
-P10 — Tendril Frontend (minimal 3D GUI)
 
 P4 — OpenWork Live Project State continues in parallel as manual operating practice.
 
