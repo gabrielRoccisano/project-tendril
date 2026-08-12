@@ -1,0 +1,8 @@
+# Godot 4 auto-generated files
+.godot/
+
+# Imported resources
+*.import
+
+# Mono-specific ignores
+.mono/
