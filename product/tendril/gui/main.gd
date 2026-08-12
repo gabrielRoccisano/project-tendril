@@ -2,20 +2,101 @@ extends GraphEdit
 
 const BACKEND_URL = "http://localhost:8000"
 
-var http_request: HTTPRequest
+var _http_workspace: HTTPRequest
+var _http_node: HTTPRequest
+var _http_edge: HTTPRequest
+var _http_cook: HTTPRequest
+var _http_patch: HTTPRequest
 
-func _ready() -> void:
-	http_request = HTTPRequest.new()
-	add_child(http_request)
-	http_request.request_completed.connect(_on_workspace_response)
+var _popup_menu: PopupMenu
+var _context_node_id: String = ""
+var _pending_spawn_position: Vector2 = Vector2.ZERO
+
+var _node_data: Dictionary = {}
+var _textedits: Dictionary = {}
+
+
+func _ready():
+	_http_workspace = HTTPRequest.new()
+	_http_node = HTTPRequest.new()
+	_http_edge = HTTPRequest.new()
+	_http_cook = HTTPRequest.new()
+	_http_patch = HTTPRequest.new()
+	for r in [_http_workspace, _http_node, _http_edge, _http_cook, _http_patch]:
+		add_child(r)
+
+	_http_workspace.request_completed.connect(_on_workspace_response)
+	_http_patch.request_completed.connect(_on_patch_response)
+
+	_popup_menu = PopupMenu.new()
+	_popup_menu.name = "ContextMenu"
+	_popup_menu.id_pressed.connect(_on_popup_action)
+	add_child(_popup_menu)
+
+	connection_request.connect(_on_connection_request)
+	popup_request.connect(_on_canvas_popup)
+
 	fetch_workspace()
 
-func fetch_workspace() -> void:
-	var error = http_request.request(BACKEND_URL + "/workspace")
-	if error != OK:
-		print("[Tendril] HTTP request failed: ", error)
 
-func _on_workspace_response(result: int, response_code: int, headers: PackedStringArray, body: PackedByteArray) -> void:
+func fetch_workspace():
+	_http_workspace.request(BACKEND_URL + "/workspace")
+
+
+func _clear_graph():
+	for child in get_children():
+		if child is GraphNode:
+			remove_child(child)
+			child.queue_free()
+	_node_data.clear()
+	_textedits.clear()
+
+
+func _spawn_graph_node(node_dict: Dictionary):
+	var node_id: String = str(node_dict.get("id", ""))
+	var pos = node_dict.get("position", {})
+	var content: String = str(node_dict.get("content", ""))
+
+	var gn = GraphNode.new()
+	gn.name = node_id
+	gn.title = _title_for_type(str(node_dict.get("type", "text_source")))
+	gn.position_offset = Vector2(pos.get("x", 0.0), pos.get("y", 0.0))
+	gn.size = Vector2(240, 150)
+
+	var te = TextEdit.new()
+	te.text = content
+	te.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	te.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	te.custom_minimum_size = Vector2(200, 80)
+	gn.add_child(te)
+	_textedits[node_id] = te
+	te.focus_exited.connect(_on_textedit_focus_exited.bind(node_id))
+
+	gn.set_slot(0, false, 0, Color.WHITE, true, 0, Color.GREEN, null, null)
+
+	gn.gui_input.connect(_on_graph_node_input.bind(node_id))
+
+	add_child(gn)
+
+	_node_data[node_id] = {
+		"inputs": node_dict.get("inputs", []),
+		"outputs": node_dict.get("outputs", []),
+		"type": str(node_dict.get("type", "text_source")),
+	}
+
+
+func _title_for_type(ntype: String) -> String:
+	match ntype:
+		"text_source": return "Text Node"
+		"file_source": return "File Node"
+		"composite_text": return "Composite"
+		"extraction": return "Extraction"
+		"compression": return "Compression"
+		"monitor": return "Monitor"
+		_: return ntype
+
+
+func _on_workspace_response(result, response_code, headers, body):
 	if response_code != 200:
 		print("[Tendril] Workspace fetch failed: ", response_code)
 		return
@@ -25,19 +106,134 @@ func _on_workspace_response(result: int, response_code: int, headers: PackedStri
 		print("[Tendril] Invalid JSON response")
 		return
 
+	_clear_graph()
+
 	var nodes_data: Array = json.get("nodes", [])
 	var edges_data: Array = json.get("edges", [])
 	print("[Tendril] Workspace loaded: ", nodes_data.size(), " nodes, ", edges_data.size(), " edges")
 
-	for node_dict in nodes_data:
-		var gn = GraphNode.new()
-		gn.name = str(node_dict.get("id", ""))
-		gn.title = str(node_dict.get("type", "unknown"))
-		gn.position_offset = Vector2(
-			node_dict.get("position", {}).get("x", 0.0),
-			node_dict.get("position", {}).get("y", 0.0)
+	for nd in nodes_data:
+		_spawn_graph_node(nd)
+
+	for ed in edges_data:
+		connect_node(
+			str(ed.get("source_node_id", "")), 0,
+			str(ed.get("target_node_id", "")), 0
 		)
-		var label = Label.new()
-		label.text = str(node_dict.get("content", ""))
-		gn.add_child(label)
-		add_child(gn)
+
+
+func _on_canvas_popup(at_position: Vector2):
+	_pending_spawn_position = at_position
+	_popup_menu.clear()
+	_popup_menu.add_item("Spawn Text Node", 0)
+	_popup_menu.position = get_screen_position() + at_position
+	_popup_menu.popup()
+
+
+func _on_graph_node_input(event: InputEvent, node_id: String):
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
+		_context_node_id = node_id
+		_popup_menu.clear()
+		_popup_menu.add_item("Cook Context", 1)
+		_popup_menu.position = get_screen_position() + get_local_mouse_position()
+		_popup_menu.popup()
+
+
+func _on_popup_action(id: int):
+	match id:
+		0:
+			_spawn_new_node(_pending_spawn_position)
+		1:
+			if _context_node_id != "":
+				_cook_node(_context_node_id)
+
+
+func _spawn_new_node(at_position: Vector2):
+	var body = JSON.stringify({
+		"type": "text_source",
+		"content": "",
+		"position": {"x": at_position.x, "y": at_position.y, "z": 0.0},
+		"inputs": [],
+		"outputs": [{"name": "text_out"}]
+	})
+	var headers = ["Content-Type: application/json"]
+	_http_node.request(BACKEND_URL + "/nodes", headers, HTTPClient.METHOD_POST, body)
+	_http_node.request_completed.connect(_on_node_created, CONNECT_ONE_SHOT)
+
+
+func _on_node_created(result, response_code, headers, body):
+	if response_code != 201:
+		print("[Tendril] Node creation failed: ", response_code)
+		return
+	var json = JSON.parse_string(body.get_string_from_utf8())
+	if json == null:
+		return
+	_spawn_graph_node(json)
+
+
+func _on_textedit_focus_exited(node_id: String):
+	var te: TextEdit = _textedits.get(node_id)
+	if te == null:
+		return
+	var body = JSON.stringify({"type": "text_source", "content": te.text})
+	var headers = ["Content-Type: application/json"]
+	_http_patch.request(
+		BACKEND_URL + "/nodes/" + node_id,
+		headers,
+		HTTPClient.METHOD_PATCH,
+		body
+	)
+
+
+func _on_patch_response(result, response_code, headers, body):
+	if response_code != 200:
+		print("[Tendril] PATCH failed: ", response_code, " - ", body.get_string_from_utf8())
+
+
+func _on_connection_request(from_node: StringName, from_port: int, to_node: StringName, to_port: int):
+	var body = JSON.stringify({
+		"source_node_id": str(from_node),
+		"source_port_name": "text_out",
+		"target_node_id": str(to_node),
+		"target_port_name": "text_in",
+		"semantic_type": "narrative_context"
+	})
+	var headers = ["Content-Type: application/json"]
+	_http_edge.request(BACKEND_URL + "/edges", headers, HTTPClient.METHOD_POST, body)
+	_http_edge.request_completed.connect(_on_edge_created, CONNECT_ONE_SHOT)
+
+
+func _on_edge_created(result, response_code, headers, body):
+	if response_code != 201:
+		print("[Tendril] Edge creation failed: ", response_code, " - ", body.get_string_from_utf8())
+		return
+	fetch_workspace()
+
+
+func _cook_node(node_id: String):
+	_http_cook.request(BACKEND_URL + "/nodes/" + node_id + "/cook", [], HTTPClient.METHOD_POST)
+	_http_cook.request_completed.connect(_on_cook_response, CONNECT_ONE_SHOT)
+
+
+func _on_cook_response(result, response_code, headers, body):
+	if response_code == 200:
+		var json = JSON.parse_string(body.get_string_from_utf8())
+		if json:
+			var compiled = str(json.get("compiled_text", ""))
+			print("[Tendril] Cook result:\n", compiled)
+			_show_cook_dialog(compiled)
+	else:
+		print("[Tendril] Cook failed: ", response_code, " - ", body.get_string_from_utf8())
+
+
+func _show_cook_dialog(text: String):
+	var dialog = AcceptDialog.new()
+	dialog.title = "Cooked Context"
+	dialog.size = Vector2(500, 400)
+	var label = Label.new()
+	label.text = text
+	label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	dialog.add_child(label)
+	add_child(dialog)
+	dialog.popup_centered()
+	dialog.confirmed.connect(dialog.queue_free)
