@@ -156,6 +156,21 @@ There is no report-free agent execution lane.
 
 New human instruction = new execution = new report.
 
+## Strict Project Perimeter
+
+The absolute project perimeter is:
+
+`/home/gabriel/project-tendril/`
+
+The agent must not navigate to, read, or modify any directory outside of this perimeter.
+
+This restriction applies to all tools, including `bash`, `read`, `edit`, `glob`, and `grep`.
+
+The agent must not execute `cd` commands that target paths outside the project perimeter.
+If a command or tool requires a path outside the project root, the agent must stop, report BLOCKED, and request the minimum human decision required.
+
+Violating the project perimeter is a critical execution boundary failure.
+
 # Mandatory Execution Logging
 
 Logging is part of execution validity.
@@ -1095,4 +1110,3 @@ A manifest change requires:
 - verification that unrelated manifest content was preserved
 
 Do not maintain a competing current plan elsewhere.
-
