@@ -99,10 +99,16 @@ class GraphStore:
         existing = self.get_node(node_id)
         if existing.is_locked:
             raise ValueError(f"Node {node_id} is locked")
+
         merged = existing.model_copy(deep=True)
-        for field, value in patch.items():
+        patch_data = patch.copy()
+        if "position" in patch_data:
+            merged.position = Position3D.model_validate(patch_data.pop("position"))
+
+        for field, value in patch_data.items():
             setattr(merged, field, value)
         merged.id = node_id
+
         with self._connection() as conn:
             with conn:
                 conn.execute(

@@ -12,15 +12,6 @@ const MENU_SPAWN_FILE_SOURCE := 6
 const MENU_CLEAR_HIGHLIGHTS := 7
 const MENU_EDGE_FIRST := 100
 
-var _http_workspace: HTTPRequest
-var _http_node: HTTPRequest
-var _http_edge: HTTPRequest
-var _http_cook: HTTPRequest
-var _http_patch: HTTPRequest
-var _http_fork: HTTPRequest
-var _http_composite_inputs: HTTPRequest
-var _http_composite_template: HTTPRequest
-
 var _popup_menu: PopupMenu
 var _context_node_id: String = ""
 var _pending_spawn_position: Vector2 = Vector2.ZERO
@@ -39,32 +30,10 @@ var _textedits: Dictionary = {}
 var _lineedits: Dictionary = {}
 var _graphnodes: Dictionary = {}
 var _edge_data: Dictionary = {}
+var _pending_position_saves: Dictionary = {}
 
 
 func _ready():
-	_http_workspace = HTTPRequest.new()
-	_http_node = HTTPRequest.new()
-	_http_edge = HTTPRequest.new()
-	_http_cook = HTTPRequest.new()
-	_http_patch = HTTPRequest.new()
-	_http_fork = HTTPRequest.new()
-	_http_composite_inputs = HTTPRequest.new()
-	_http_composite_template = HTTPRequest.new()
-	for r in [
-		_http_workspace,
-		_http_node,
-		_http_edge,
-		_http_cook,
-		_http_patch,
-		_http_fork,
-		_http_composite_inputs,
-		_http_composite_template,
-	]:
-		add_child(r)
-
-	_http_workspace.request_completed.connect(_on_workspace_response)
-	_http_patch.request_completed.connect(_on_patch_response)
-
 	_popup_menu = PopupMenu.new()
 	_popup_menu.name = "ContextMenu"
 	_popup_menu.id_pressed.connect(_on_popup_action)
@@ -74,12 +43,46 @@ func _ready():
 
 	connection_request.connect(_on_connection_request)
 	popup_request.connect(_on_canvas_popup)
+	end_node_move.connect(_on_end_node_move)
 
 	fetch_workspace()
 
 
+func _send_api_request(
+	url: String,
+	headers: Array,
+	method: HTTPClient.Method,
+	body: String = "",
+	callback: Callable = Callable()
+) -> void:
+	var request := HTTPRequest.new()
+	add_child(request)
+	request.request_completed.connect(
+		_on_api_request_completed.bind(request, callback),
+		CONNECT_ONE_SHOT
+	)
+
+	var error := request.request(url, headers, method, body)
+	if error != OK:
+		print("[Tendril] API request failed to start: ", error, " - ", url)
+		request.queue_free()
+
+
+func _on_api_request_completed(
+	result: int,
+	response_code: int,
+	headers: PackedStringArray,
+	body: PackedByteArray,
+	request: HTTPRequest,
+	callback: Callable
+) -> void:
+	if callback.is_valid():
+		callback.call(result, response_code, headers, body)
+	request.queue_free()
+
+
 func fetch_workspace():
-	_http_workspace.request(BACKEND_URL + "/workspace")
+	_send_api_request(BACKEND_URL + "/workspace", [], HTTPClient.METHOD_GET, "", _on_workspace_response)
 
 
 func _setup_composite_dialogs():
@@ -130,6 +133,8 @@ func _spawn_graph_node(node_dict: Dictionary):
 	gn.title = _title_for_type(ntype)
 	gn.position_offset = Vector2(pos.get("x", 0.0), pos.get("y", 0.0))
 	gn.size = Vector2(240, 150)
+	gn.draggable = not is_locked
+	gn.dragged.connect(_on_graph_node_dragged.bind(node_id))
 
 	var port_color: Color = Color(0.2, 0.8, 0.2) if is_locked else Color(0.8, 0.2, 0.2)
 	if ntype == "composite_text":
@@ -175,6 +180,7 @@ func _spawn_graph_node(node_dict: Dictionary):
 		"type": ntype,
 		"is_locked": is_locked,
 		"content": content,
+		"position": {"x": gn.position_offset.x, "y": gn.position_offset.y, "z": 0.0},
 	}
 
 	if is_locked:
@@ -219,6 +225,7 @@ func _apply_locked_style(node_id: String):
 	var path_edit: LineEdit = _lineedits.get(node_id)
 	if path_edit:
 		path_edit.editable = false
+	gn.draggable = false
 	var panel = StyleBoxFlat.new()
 	panel.bg_color = Color(0.15, 0.35, 0.15, 1.0)
 	panel.border_width_left = 2
@@ -391,8 +398,7 @@ func _spawn_new_node(at_position: Vector2):
 		"outputs": [{"name": "text_out"}]
 	})
 	var headers = ["Content-Type: application/json"]
-	_http_node.request(BACKEND_URL + "/nodes", headers, HTTPClient.METHOD_POST, body)
-	_http_node.request_completed.connect(_on_node_created, CONNECT_ONE_SHOT)
+	_send_api_request(BACKEND_URL + "/nodes", headers, HTTPClient.METHOD_POST, body, _on_node_created)
 
 
 func _spawn_new_file_source_node(at_position: Vector2):
@@ -404,16 +410,7 @@ func _spawn_new_file_source_node(at_position: Vector2):
 		"outputs": [{"name": "text_out"}]
 	})
 	var headers = ["Content-Type: application/json"]
-	var error := _http_node.request(
-		BACKEND_URL + "/nodes",
-		headers,
-		HTTPClient.METHOD_POST,
-		body
-	)
-	if error != OK:
-		print("[Tendril] File source node request failed to start: ", error)
-		return
-	_http_node.request_completed.connect(_on_node_created, CONNECT_ONE_SHOT)
+	_send_api_request(BACKEND_URL + "/nodes", headers, HTTPClient.METHOD_POST, body, _on_node_created)
 
 
 func _spawn_new_composite_node(at_position: Vector2):
@@ -426,16 +423,7 @@ func _spawn_new_composite_node(at_position: Vector2):
 		"properties": {"template": ""},
 	})
 	var headers = ["Content-Type: application/json"]
-	var error := _http_node.request(
-		BACKEND_URL + "/nodes",
-		headers,
-		HTTPClient.METHOD_POST,
-		body
-	)
-	if error != OK:
-		print("[Tendril] Composite node request failed to start: ", error)
-		return
-	_http_node.request_completed.connect(_on_node_created, CONNECT_ONE_SHOT)
+	_send_api_request(BACKEND_URL + "/nodes", headers, HTTPClient.METHOD_POST, body, _on_node_created)
 
 
 func _on_node_created(result, response_code, headers, body):
@@ -487,17 +475,13 @@ func _on_port_name_confirmed():
 		"properties": updated_properties,
 	})
 	var headers = ["Content-Type: application/json"]
-	var callback := _on_composite_inputs_patched.bind(node_id, updated_inputs, updated_properties)
-	_http_composite_inputs.request_completed.connect(callback, CONNECT_ONE_SHOT)
-	var error := _http_composite_inputs.request(
+	_send_api_request(
 		BACKEND_URL + "/nodes/" + node_id,
 		headers,
 		HTTPClient.METHOD_PATCH,
-		body
+		body,
+		_on_composite_inputs_patched.bind(node_id, updated_inputs, updated_properties)
 	)
-	if error != OK:
-		_http_composite_inputs.request_completed.disconnect(callback)
-		print("[Tendril] Composite input PATCH failed to start: ", error)
 
 
 func _on_composite_inputs_patched(
@@ -553,17 +537,13 @@ func _on_template_confirmed():
 		"properties": updated_properties,
 	})
 	var headers = ["Content-Type: application/json"]
-	var callback := _on_composite_template_patched.bind(node_id, updated_inputs, updated_properties)
-	_http_composite_template.request_completed.connect(callback, CONNECT_ONE_SHOT)
-	var error := _http_composite_template.request(
+	_send_api_request(
 		BACKEND_URL + "/nodes/" + node_id,
 		headers,
 		HTTPClient.METHOD_PATCH,
-		body
+		body,
+		_on_composite_template_patched.bind(node_id, updated_inputs, updated_properties)
 	)
-	if error != OK:
-		_http_composite_template.request_completed.disconnect(callback)
-		print("[Tendril] Composite template PATCH failed to start: ", error)
 
 
 func _on_composite_template_patched(
@@ -609,17 +589,13 @@ func _on_file_path_focus_exited(node_id: String):
 		"content": file_path,
 	})
 	var headers = ["Content-Type: application/json"]
-	var callback := _on_file_path_patched.bind(node_id, file_path)
-	_http_patch.request_completed.connect(callback, CONNECT_ONE_SHOT)
-	var error := _http_patch.request(
+	_send_api_request(
 		BACKEND_URL + "/nodes/" + node_id,
 		headers,
 		HTTPClient.METHOD_PATCH,
-		body
+		body,
+		_on_file_path_patched.bind(node_id, file_path)
 	)
-	if error != OK:
-		_http_patch.request_completed.disconnect(callback)
-		print("[Tendril] File path PATCH failed to start: ", error)
 
 
 func _on_file_path_patched(
@@ -655,17 +631,66 @@ func _on_textedit_focus_exited(node_id: String):
 		return
 	var body = JSON.stringify({"type": nd.get("type", "text_source"), "content": te.text})
 	var headers = ["Content-Type: application/json"]
-	_http_patch.request(
+	_send_api_request(
 		BACKEND_URL + "/nodes/" + node_id,
 		headers,
 		HTTPClient.METHOD_PATCH,
-		body
+		body,
+		_on_patch_response
 	)
 
 
 func _on_patch_response(result, response_code, headers, body):
 	if response_code != 200:
 		print("[Tendril] PATCH failed: ", response_code, " - ", body.get_string_from_utf8())
+
+
+func _on_graph_node_dragged(_from: Vector2, to: Vector2, node_id: String) -> void:
+	var node_data: Dictionary = _node_data.get(node_id, {})
+	if node_data.get("is_locked", false):
+		return
+	_pending_position_saves[node_id] = to
+
+
+func _on_end_node_move() -> void:
+	for pending_node_id in _pending_position_saves:
+		var node_id := str(pending_node_id)
+		var position: Vector2 = _pending_position_saves[pending_node_id]
+		_patch_node_position(node_id, position)
+	_pending_position_saves.clear()
+
+
+func _patch_node_position(node_id: String, position: Vector2) -> void:
+	var body := JSON.stringify({
+		"position": {"x": position.x, "y": position.y, "z": 0.0},
+	})
+	var headers = ["Content-Type: application/json"]
+	_send_api_request(
+		BACKEND_URL + "/nodes/" + node_id,
+		headers,
+		HTTPClient.METHOD_PATCH,
+		body,
+		_on_node_position_patched.bind(node_id, position)
+	)
+
+
+func _on_node_position_patched(
+	result: int,
+	response_code: int,
+	headers: PackedStringArray,
+	body: PackedByteArray,
+	node_id: String,
+	requested_position: Vector2
+) -> void:
+	if response_code != 200:
+		print("[Tendril] Position PATCH failed: ", response_code, " - ", body.get_string_from_utf8())
+		return
+	if _node_data.has(node_id):
+		_node_data[node_id]["position"] = {
+			"x": requested_position.x,
+			"y": requested_position.y,
+			"z": 0.0,
+		}
 
 
 func _port_name_at(node_id: String, collection: String, port_index: int) -> String:
@@ -702,8 +727,7 @@ func _on_connection_request(from_node: StringName, from_port: int, to_node: Stri
 		"semantic_type": "narrative_context",
 	})
 	var headers = ["Content-Type: application/json"]
-	_http_edge.request(BACKEND_URL + "/edges", headers, HTTPClient.METHOD_POST, body)
-	_http_edge.request_completed.connect(_on_edge_created, CONNECT_ONE_SHOT)
+	_send_api_request(BACKEND_URL + "/edges", headers, HTTPClient.METHOD_POST, body, _on_edge_created)
 
 
 func _on_edge_created(result, response_code, headers, body):
@@ -721,13 +745,13 @@ func _lock_node(node_id: String):
 		"is_locked": true
 	})
 	var headers = ["Content-Type: application/json"]
-	_http_patch.request(
+	_send_api_request(
 		BACKEND_URL + "/nodes/" + node_id,
 		headers,
 		HTTPClient.METHOD_PATCH,
-		body
+		body,
+		_on_lock_response.bind(node_id)
 	)
-	_http_patch.request_completed.connect(_on_lock_response.bind(node_id), CONNECT_ONE_SHOT)
 
 
 func _on_lock_response(result, response_code, headers, body, node_id: String):
@@ -760,13 +784,13 @@ func _toggle_edge_type(edge_id: String, new_semantic_type: String):
 		"semantic_type": new_semantic_type
 	})
 	var headers = ["Content-Type: application/json"]
-	_http_patch.request(
+	_send_api_request(
 		BACKEND_URL + "/edges/" + edge_id,
 		headers,
 		HTTPClient.METHOD_PATCH,
-		body
+		body,
+		_on_edge_toggle_response.bind(edge_id, new_semantic_type)
 	)
-	_http_patch.request_completed.connect(_on_edge_toggle_response.bind(edge_id, new_semantic_type), CONNECT_ONE_SHOT)
 
 
 func _on_edge_toggle_response(result, response_code, headers, body, edge_id: String, new_type: String):
@@ -782,8 +806,13 @@ func _on_edge_toggle_response(result, response_code, headers, body, edge_id: Str
 
 
 func _fork_node(node_id: String):
-	_http_fork.request(BACKEND_URL + "/nodes/" + node_id + "/fork", [], HTTPClient.METHOD_POST)
-	_http_fork.request_completed.connect(_on_fork_response.bind(node_id), CONNECT_ONE_SHOT)
+	_send_api_request(
+		BACKEND_URL + "/nodes/" + node_id + "/fork",
+		[],
+		HTTPClient.METHOD_POST,
+		"",
+		_on_fork_response.bind(node_id)
+	)
 
 
 func _on_fork_response(result, response_code, headers, body, original_id: String):
@@ -806,8 +835,13 @@ func _on_fork_response(result, response_code, headers, body, original_id: String
 
 func _cook_node(node_id: String):
 	_cooking_node_id = node_id
-	_http_cook.request(BACKEND_URL + "/nodes/" + node_id + "/cook", [], HTTPClient.METHOD_POST)
-	_http_cook.request_completed.connect(_on_cook_response, CONNECT_ONE_SHOT)
+	_send_api_request(
+		BACKEND_URL + "/nodes/" + node_id + "/cook",
+		[],
+		HTTPClient.METHOD_POST,
+		"",
+		_on_cook_response
+	)
 
 
 func _on_cook_response(result, response_code, headers, body):
@@ -842,8 +876,7 @@ func _spawn_monitor_node(compiled_text: String):
 		"outputs": []
 	})
 	var headers = ["Content-Type: application/json"]
-	_http_node.request(BACKEND_URL + "/nodes", headers, HTTPClient.METHOD_POST, body)
-	_http_node.request_completed.connect(_on_monitor_created, CONNECT_ONE_SHOT)
+	_send_api_request(BACKEND_URL + "/nodes", headers, HTTPClient.METHOD_POST, body, _on_monitor_created)
 
 
 func _on_monitor_created(result, response_code, headers, body):
@@ -865,7 +898,7 @@ func _on_monitor_created(result, response_code, headers, body):
 			"semantic_type": "narrative_context"
 		})
 		var req_headers = ["Content-Type: application/json"]
-		_http_edge.request(BACKEND_URL + "/edges", req_headers, HTTPClient.METHOD_POST, edge_body)
+		_send_api_request(BACKEND_URL + "/edges", req_headers, HTTPClient.METHOD_POST, edge_body, _on_edge_created)
 
 
 func _show_cook_dialog(text: String):
