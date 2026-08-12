@@ -1,7 +1,7 @@
 import uuid
 from pathlib import Path
 
-from .models import CookResponse, Edge, Node
+from models import CookResponse, Edge, Node
 
 
 class GraphStore:

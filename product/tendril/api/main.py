@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 
-from .graph import GraphStore
-from .models import CookResponse, Edge, Node
+from graph import GraphStore
+from models import CookResponse, Edge, Node
 
 app = FastAPI()
 store = GraphStore()
