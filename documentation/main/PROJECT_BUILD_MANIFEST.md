@@ -537,7 +537,7 @@ The backend is a functional DAG execution engine implementing:
 - Operator-based node model (Text Source, File Source, Composite Text, Extraction, Compression, Monitor)
 - Named input/output ports with dynamic port registration
 - Recursive "cook" traversal with cycle detection
-- Semantic-aware template engine (narrative_context / RED, stable_reference / GREEN)
+- Semantic-aware template engine (`text` / RED, `memory_consolidation` / GREEN)
 - Immutable history with fork-based non-destructive editing (supersedes edges)
 - Position support (2D coordinates with z=0.0 for V0, 3D-ready data model)
 
@@ -568,7 +568,6 @@ The Godot 4 GUI uses native `Control` and `GraphEdit` systems and must support:
 - node spawning with inline `TextEdit` inputs
 - noodle/edge drawing with semantic visual styles (RED dashed, GREEN solid, supersedes metallic)
 - LOD strategy (cached thumbnails for zoomed-out nodes, heavy widgets only for focused nodes)
-- 2D canvas with semantic gravity (X: progression, Y: abstraction — canopy vs. ground)
 
 Target relationship:
 

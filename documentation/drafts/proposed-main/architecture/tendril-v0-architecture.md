@@ -3,9 +3,9 @@
 ## 1. Executive Summary
 This document outlines the finalized architecture for Tendril V0. Tendril is a provenance-first, spatial context-management system. It replaces degrading, linear chat context windows with a functional, port-based Directed Acyclic Graph (DAG). 
 
-V0 is restricted to a 2D node graph interface to ensure rapid development and high-performance text editing. However, the underlying data model and backend infrastructure are explicitly designed to support a 3D mycelial spatial topology in V1. 
+V0 is restricted to a 2D node graph interface to ensure rapid development and high-performance text editing. However, the underlying data model and backend infrastructure are explicitly designed to support a 3D spatial topology in V1.
 
-The core value proposition of V0 is proving the metabolic workflow: taking messy, bloated chat narratives (RED), manually extracting stable decisions (GREEN), compressing the narrative, and feeding a lean, highly focused context packet into a new branch of work.
+The core value proposition of V0 is proving the core workflow: taking messy, bloated chat narratives (RED), manually extracting stable decisions (GREEN), compressing the narrative, and feeding a lean, highly focused context packet into a new branch of work.
 
 ## 2. Tech Stack: Godot 4 (Native Client) + Python (Backend)
 Tendril must feel like Houdini, Nuke, or TouchDesigner—a butter-smooth native spatial UI. Web-based frameworks (WebGL/DOM) fail at high-density text rendering in spatial canvases.
@@ -35,28 +35,24 @@ The Python backend is a graph traversal and execution engine.
 `POST /nodes/{id}/cook` triggers recursive upstream traversal. The engine fetches text from connected output ports, passes the text dictionary to the target node's Operator class, executes the logic, and returns the final compiled string. The engine must implement cycle detection and handle missing/unconnected inputs gracefully (passing empty strings).
 
 **2. Semantic-Aware Template Engine:**
-Edges are strictly typed (`narrative_context` / RED, `stable_reference` / GREEN). The `cook` engine passes the `semantic_type` to the template renderer alongside the text. The template syntax must support conditional formatting based on this (e.g., rendering GREEN inputs as markdown blockquotes or footnotes, and RED inputs as inline narrative).
+Edges are strictly typed (`text` / RED, `memory_consolidation` / GREEN). RED denotes basic text: raw prompt text, chat text, model responses, and other unconsolidated textual content. GREEN denotes extracted memory consolidations: decisions, invariants, derived constraints, definitions, and stable facts promoted to durable memory. The `cook` engine passes the `semantic_type` to the template renderer alongside the text. The template syntax must support conditional formatting based on this (e.g., rendering GREEN inputs as markdown blockquotes or footnotes, and RED inputs as inline text).
 
-**3. Immutability & Forking (Mycelial Rules):**
+**3. Immutability & Forking Rules:**
 History is immutable. The backend enforces this.
 *   If a node is `is_locked = true`, `PATCH` requests to modify its text are **rejected**.
 *   To edit a locked node, the GUI calls `POST /nodes/{id}/fork`. The backend duplicates the node, copies properties, sets the new node to `is_locked = false`, and automatically generates a `supersedes` edge.
 *   **Traversal Rule:** If the cook engine encounters a node that has been superseded (an outgoing `supersedes` edge), it must dynamically reroute to the superseding node to ensure compiled context reflects the *current* state of decisions.
 
 ## 5. Spatial Semantics & Visual Language (2D for V0)
-Even in the 2D Godot GUI, the canvas has semantic gravity. It is not an arbitrary sandbox.
+V0 uses a standard flat 2D graph layout. Nodes can be placed freely anywhere on the X/Y plane. There is no enforced vertical or horizontal semantic gravity in V0.
 
-*   **X-Axis (Progression):** Left to right. Past to future.
-*   **Y-Axis (Abstraction):** 
-    *   **Bottom of screen (Y > 0): The "Ground".** Stable, locked decisions (GREEN) snap here.
-    *   **Top/Middle (Y < 0): The "Canopy".** Uncommitted, exploratory narrative (RED) floats here.
 *   **V0 Data Contract Guarantee:** The GUI maps 2D screen coordinates to a 3D vector before sending to the API: `position: {"x": 150.0, "y": -200.0, "z": 0.0}`. Z is hardcoded to `0.0` for V0.
-*   **Node States (Live vs. Baked):** 
-    *   *Live (Unlocked):* Emissive, subtly pulsing, editable. These are the active exploration edges.
-    *   *Baked (Locked):* Matte, solid, read-only. These are frozen history.
+*   **Node States (Unlocked vs Locked):**
+    *   *Unlocked:* Editable.
+    *   *Locked:* Read-only.
 *   **Edge (Noodle) Styles:**
-    *   `narrative_context` (RED): Emissive, slightly dashed line.
-    *   `stable_reference` (GREEN): Solid, thick line.
+    *   `text` (RED): Ports and noodles represent basic text: raw prompt text, chat text, model responses, and other unconsolidated textual content. Noodles are emissive and slightly dashed.
+    *   `memory_consolidation` (GREEN): Ports and noodles represent extracted memory consolidations: decisions, invariants, derived constraints, definitions, and stable facts promoted to durable memory. Noodles remain solid and visually heavier than RED noodles.
     *   `supersedes` (Fork): Distinct metallic silver or blue dashed line to trace non-destructive edit history without confusing it with active context flow.
 
 ## 6. V0 API State Contract
