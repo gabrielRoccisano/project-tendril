@@ -1,4 +1,5 @@
 import uuid
+from pathlib import Path
 
 from .models import CookResponse, Edge, Node
 
@@ -39,6 +40,12 @@ class GraphStore:
         self._edges[edge.id] = edge
         return edge
 
+    def get_workspace(self) -> dict:
+        return {
+            "nodes": list(self._nodes.values()),
+            "edges": list(self._edges.values()),
+        }
+
     def cook(self, node_id: str) -> CookResponse:
         traversed_nodes: list[str] = []
         traversed_edges: list[str] = []
@@ -67,7 +74,18 @@ class GraphStore:
 
             node = self._nodes[nid]
 
-            if node.type in ("text_source", "file_source", "extraction", "compression", "monitor"):
+            if node.type == "file_source":
+                if nid not in traversed_nodes:
+                    traversed_nodes.append(nid)
+                file_path = node.content or node.properties.template
+                if not file_path:
+                    return ""
+                try:
+                    return Path(file_path).read_text()
+                except FileNotFoundError:
+                    return "[Error: File Not Found]"
+
+            if node.type in ("text_source", "extraction", "compression", "monitor"):
                 if nid not in traversed_nodes:
                     traversed_nodes.append(nid)
                 return node.content

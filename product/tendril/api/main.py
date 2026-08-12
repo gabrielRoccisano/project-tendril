@@ -59,3 +59,8 @@ async def fork_node(node_id: str) -> Node:
         return store.fork_node(node_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="node not found")
+
+
+@app.get("/workspace")
+async def get_workspace():
+    return store.get_workspace()
