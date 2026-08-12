@@ -1,0 +1,26 @@
+task_id: T-XXXX
+title: Short task title
+
+objective:
+  One specific result this task must produce.
+
+scope:
+  read: []
+  write: []
+
+context: []
+
+capabilities:
+  network: false
+  tools: []
+
+constraints:
+  - Do not expand beyond this task.
+
+depends_on: []
+
+done_when:
+  - Observable completion condition.
+
+expected_evidence:
+  - What must be shown or recorded to support completion.

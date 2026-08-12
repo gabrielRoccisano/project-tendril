@@ -1,0 +1,33 @@
+# Tendril mutable/local runtime state
+runtime/
+tmp/
+worktrees/
+
+# Local environment
+bootstrap/project.env
+.env
+.env.*
+*.env
+
+# Backups
+*.bak
+*.bak_*
+
+# Secrets / credentials
+*.key
+*.pem
+*.token
+secrets/
+credentials/
+
+# Common generated files
+__pycache__/
+*.pyc
+node_modules/
+dist/
+build/
+.DS_Store
+Thumbs.db
+
+# Alternate backup suffixes
+*_bak_*
