@@ -40,6 +40,12 @@ class GraphStore:
         self._edges[edge.id] = edge
         return edge
 
+    def update_edge(self, edge_id: str, edge: Edge) -> Edge:
+        if edge_id not in self._edges:
+            raise KeyError(f"Edge {edge_id} not found")
+        self._edges[edge_id].semantic_type = edge.semantic_type
+        return self._edges[edge_id]
+
     def get_workspace(self) -> dict:
         return {
             "nodes": list(self._nodes.values()),
@@ -104,7 +110,11 @@ class GraphStore:
                         ):
                             if edge.id not in traversed_edges:
                                 traversed_edges.append(edge.id)
-                            text = _cook_node(edge.source_node_id)
+                            raw = _cook_node(edge.source_node_id)
+                            if edge.semantic_type == "stable_reference":
+                                text = "> " + raw + "\n"
+                            else:
+                                text = raw
                             break
                     upstream_texts[port.name] = text
 

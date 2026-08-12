@@ -64,3 +64,11 @@ async def fork_node(node_id: str) -> Node:
 @app.get("/workspace")
 async def get_workspace():
     return store.get_workspace()
+
+
+@app.patch("/edges/{edge_id}")
+async def update_edge(edge_id: str, edge: Edge) -> Edge:
+    try:
+        return store.update_edge(edge_id, edge)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="edge not found")

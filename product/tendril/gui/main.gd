@@ -17,6 +17,7 @@ var _cooking_node_id: String = ""
 var _node_data: Dictionary = {}
 var _textedits: Dictionary = {}
 var _graphnodes: Dictionary = {}
+var _edge_data: Dictionary = {}
 
 
 func _ready():
@@ -55,6 +56,7 @@ func _clear_graph():
 	_node_data.clear()
 	_textedits.clear()
 	_graphnodes.clear()
+	_edge_data.clear()
 
 
 func _spawn_graph_node(node_dict: Dictionary):
@@ -153,6 +155,14 @@ func _on_workspace_response(result, response_code, headers, body):
 			str(ed.get("source_node_id", "")), 0,
 			str(ed.get("target_node_id", "")), 0
 		)
+		var edge_id: String = str(ed.get("id", ""))
+		var key: String = str(ed.get("source_node_id", "")) + "|" + str(ed.get("target_node_id", ""))
+		_edge_data[key] = {
+			"id": edge_id,
+			"semantic_type": str(ed.get("semantic_type", "narrative_context")),
+			"source_node_id": str(ed.get("source_node_id", "")),
+			"target_node_id": str(ed.get("target_node_id", "")),
+		}
 
 
 func _on_canvas_popup(at_position: Vector2):
@@ -171,6 +181,17 @@ func _on_graph_node_input(event: InputEvent, node_id: String):
 		_popup_menu.add_item("Cook Context", 1)
 		if not nd.get("is_locked", false):
 			_popup_menu.add_item("Lock / Bake", 2)
+
+		var edge_index: int = 100
+		for key in _edge_data:
+			var ed: Dictionary = _edge_data[key]
+			if ed.get("source_node_id", "") == node_id:
+				var target_id: String = ed.get("target_node_id", "")
+				var etype: String = ed.get("semantic_type", "narrative_context")
+				var label: String = "Edge → " + target_id.get_slice("-", 1) + ": " + ("RED" if etype == "narrative_context" else "GREEN")
+				_popup_menu.add_item(label, edge_index)
+				edge_index += 1
+
 		_popup_menu.position = get_screen_position() + get_local_mouse_position()
 		_popup_menu.popup()
 
@@ -190,6 +211,9 @@ func _on_popup_action(id: int):
 		2:
 			if _context_node_id != "":
 				_lock_node(_context_node_id)
+		_:
+			if id >= 100:
+				_toggle_edge_by_menu_index(_context_node_id, id - 100)
 
 
 func _spawn_new_node(at_position: Vector2):
@@ -280,6 +304,49 @@ func _on_lock_response(result, response_code, headers, body, node_id: String):
 		return
 	_node_data[node_id]["is_locked"] = true
 	_apply_locked_style(node_id)
+
+
+func _toggle_edge_by_menu_index(source_node_id: String, menu_index: int):
+	var idx: int = 0
+	for key in _edge_data:
+		var ed: Dictionary = _edge_data[key]
+		if ed.get("source_node_id", "") == source_node_id:
+			if idx == menu_index:
+				var etype: String = ed.get("semantic_type", "narrative_context")
+				var new_type: String = "stable_reference" if etype == "narrative_context" else "narrative_context"
+				_toggle_edge_type(ed.get("id", ""), new_type)
+				return
+			idx += 1
+
+
+func _toggle_edge_type(edge_id: String, new_semantic_type: String):
+	var body = JSON.stringify({
+		"source_node_id": "",
+		"source_port_name": "",
+		"target_node_id": "",
+		"target_port_name": "",
+		"semantic_type": new_semantic_type
+	})
+	var headers = ["Content-Type: application/json"]
+	_http_patch.request(
+		BACKEND_URL + "/edges/" + edge_id,
+		headers,
+		HTTPClient.METHOD_PATCH,
+		body
+	)
+	_http_patch.request_completed.connect(_on_edge_toggle_response.bind(edge_id, new_semantic_type), CONNECT_ONE_SHOT)
+
+
+func _on_edge_toggle_response(result, response_code, headers, body, edge_id: String, new_type: String):
+	if response_code == 200:
+		for key in _edge_data:
+			var ed: Dictionary = _edge_data[key]
+			if ed.get("id", "") == edge_id:
+				ed["semantic_type"] = new_type
+				break
+		print("[Tendril] Edge ", edge_id, " toggled to ", new_type)
+	else:
+		print("[Tendril] Edge toggle failed: ", response_code, " - ", body.get_string_from_utf8())
 
 
 func _fork_node(node_id: String):
