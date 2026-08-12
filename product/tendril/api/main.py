@@ -1,7 +1,19 @@
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
 from graph import GraphStore
-from models import CookResponse, Edge, Node
+from models import CookResponse, Edge, Node, NodeProperties, NodeType, Port, Position3D
+
+
+class NodePatch(BaseModel):
+    type: NodeType | None = None
+    is_locked: bool | None = None
+    content: str | None = None
+    position: Position3D | None = None
+    inputs: list[Port] | None = None
+    outputs: list[Port] | None = None
+    properties: NodeProperties | None = None
+
 
 app = FastAPI()
 store = GraphStore()
@@ -26,9 +38,11 @@ async def get_node(node_id: str) -> Node:
 
 
 @app.patch("/nodes/{node_id}")
-async def update_node(node_id: str, node: Node) -> Node:
+async def update_node(node_id: str, node: NodePatch) -> Node:
     try:
-        return store.update_node(node_id, node)
+        return store.update_node(
+            node_id, node.model_dump(exclude_unset=True, exclude_none=True)
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="node not found")
     except ValueError as e:

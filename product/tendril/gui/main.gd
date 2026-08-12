@@ -82,7 +82,7 @@ func _spawn_graph_node(node_dict: Dictionary):
 	te.focus_exited.connect(_on_textedit_focus_exited.bind(node_id))
 
 	var port_color: Color = Color(0.2, 0.8, 0.2) if is_locked else Color(0.8, 0.2, 0.2)
-	gn.set_slot(0, false, 0, Color.WHITE, true, 0, port_color, null, null)
+	gn.set_slot(0, true, 0, Color.WHITE, true, 0, port_color, null, null)
 
 	gn.gui_input.connect(_on_graph_node_input.bind(node_id))
 

@@ -1,6 +1,8 @@
 import json
 import sqlite3
+import threading
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 from models import CookResponse, Edge, Node, NodeProperties, Port, Position3D
@@ -9,14 +11,27 @@ from models import CookResponse, Edge, Node, NodeProperties, Port, Position3D
 class GraphStore:
     def __init__(self, db_path: str | Path = "tendril.db") -> None:
         self._db_path = str(db_path)
-        self._conn = sqlite3.connect(self._db_path)
-        self._conn.row_factory = sqlite3.Row
+        self._lock = threading.Lock()
         self._apply_migrations()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    @contextmanager
+    def _connection(self):
+        with self._lock:
+            conn = self._connect()
+            try:
+                yield conn
+            finally:
+                conn.close()
 
     def _apply_migrations(self) -> None:
         migrations_path = Path(__file__).with_name("migrations.sql")
-        with self._conn:
-            self._conn.executescript(migrations_path.read_text())
+        with self._connection() as conn:
+            conn.executescript(migrations_path.read_text())
 
     def _row_to_node(self, row: sqlite3.Row) -> Node:
         return Node(
@@ -61,83 +76,92 @@ class GraphStore:
     def add_node(self, node: Node) -> Node:
         if not node.id:
             node.id = str(uuid.uuid4())
-        with self._conn:
-            self._conn.execute(
-                "INSERT INTO nodes (id, type, is_locked, position_x, position_y,"
-                " position_z, inputs, outputs, properties, content)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                self._node_to_row(node),
-            )
+        with self._connection() as conn:
+            with conn:
+                conn.execute(
+                    "INSERT INTO nodes (id, type, is_locked, position_x, position_y,"
+                    " position_z, inputs, outputs, properties, content)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    self._node_to_row(node),
+                )
         return node
 
     def get_node(self, node_id: str) -> Node:
-        row = self._conn.execute(
-            "SELECT * FROM nodes WHERE id = ?", (node_id,)
-        ).fetchone()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM nodes WHERE id = ?", (node_id,)
+            ).fetchone()
         if row is None:
             raise KeyError(f"Node {node_id} not found")
         return self._row_to_node(row)
 
-    def update_node(self, node_id: str, node: Node) -> Node:
+    def update_node(self, node_id: str, patch: dict) -> Node:
         existing = self.get_node(node_id)
         if existing.is_locked:
             raise ValueError(f"Node {node_id} is locked")
-        node.id = node_id
-        with self._conn:
-            self._conn.execute(
-                "UPDATE nodes SET type = ?, is_locked = ?, position_x = ?,"
-                " position_y = ?, position_z = ?, inputs = ?, outputs = ?,"
-                " properties = ?, content = ? WHERE id = ?",
-                (*self._node_to_row(node)[1:], node_id),
-            )
-        return node
+        merged = existing.model_copy(deep=True)
+        for field, value in patch.items():
+            setattr(merged, field, value)
+        merged.id = node_id
+        with self._connection() as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE nodes SET type = ?, is_locked = ?, position_x = ?,"
+                    " position_y = ?, position_z = ?, inputs = ?, outputs = ?,"
+                    " properties = ?, content = ? WHERE id = ?",
+                    (*self._node_to_row(merged)[1:], node_id),
+                )
+        return merged
 
     def add_edge(self, edge: Edge) -> Edge:
         if not edge.id:
             edge.id = str(uuid.uuid4())
-        if not self._conn.execute(
-            "SELECT 1 FROM nodes WHERE id = ?", (edge.source_node_id,)
-        ).fetchone():
-            raise KeyError(f"Source node {edge.source_node_id} not found")
-        if not self._conn.execute(
-            "SELECT 1 FROM nodes WHERE id = ?", (edge.target_node_id,)
-        ).fetchone():
-            raise KeyError(f"Target node {edge.target_node_id} not found")
-        with self._conn:
-            self._conn.execute(
-                "INSERT INTO edges (id, source_node_id, source_port_name,"
-                " target_node_id, target_port_name, semantic_type)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    edge.id,
-                    edge.source_node_id,
-                    edge.source_port_name,
-                    edge.target_node_id,
-                    edge.target_port_name,
-                    edge.semantic_type,
-                ),
-            )
+        with self._connection() as conn:
+            if not conn.execute(
+                "SELECT 1 FROM nodes WHERE id = ?", (edge.source_node_id,)
+            ).fetchone():
+                raise KeyError(f"Source node {edge.source_node_id} not found")
+            if not conn.execute(
+                "SELECT 1 FROM nodes WHERE id = ?", (edge.target_node_id,)
+            ).fetchone():
+                raise KeyError(f"Target node {edge.target_node_id} not found")
+            with conn:
+                conn.execute(
+                    "INSERT INTO edges (id, source_node_id, source_port_name,"
+                    " target_node_id, target_port_name, semantic_type)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        edge.id,
+                        edge.source_node_id,
+                        edge.source_port_name,
+                        edge.target_node_id,
+                        edge.target_port_name,
+                        edge.semantic_type,
+                    ),
+                )
         return edge
 
     def update_edge(self, edge_id: str, edge: Edge) -> Edge:
-        existing = self._conn.execute(
-            "SELECT * FROM edges WHERE id = ?", (edge_id,)
-        ).fetchone()
-        if existing is None:
-            raise KeyError(f"Edge {edge_id} not found")
-        with self._conn:
-            self._conn.execute(
-                "UPDATE edges SET semantic_type = ? WHERE id = ?",
-                (edge.semantic_type, edge_id),
-            )
-        updated = self._conn.execute(
-            "SELECT * FROM edges WHERE id = ?", (edge_id,)
-        ).fetchone()
+        with self._connection() as conn:
+            existing = conn.execute(
+                "SELECT * FROM edges WHERE id = ?", (edge_id,)
+            ).fetchone()
+            if existing is None:
+                raise KeyError(f"Edge {edge_id} not found")
+            with conn:
+                conn.execute(
+                    "UPDATE edges SET semantic_type = ? WHERE id = ?",
+                    (edge.semantic_type, edge_id),
+                )
+            updated = conn.execute(
+                "SELECT * FROM edges WHERE id = ?", (edge_id,)
+            ).fetchone()
         return self._row_to_edge(updated)
 
     def get_workspace(self) -> dict:
-        node_rows = self._conn.execute("SELECT * FROM nodes").fetchall()
-        edge_rows = self._conn.execute("SELECT * FROM edges").fetchall()
+        with self._connection() as conn:
+            node_rows = conn.execute("SELECT * FROM nodes").fetchall()
+            edge_rows = conn.execute("SELECT * FROM edges").fetchall()
         return {
             "nodes": [self._row_to_node(row) for row in node_rows],
             "edges": [self._row_to_edge(row) for row in edge_rows],
@@ -147,7 +171,8 @@ class GraphStore:
         return self.get_node(node_id)
 
     def _fetch_edges(self) -> list[Edge]:
-        rows = self._conn.execute("SELECT * FROM edges").fetchall()
+        with self._connection() as conn:
+            rows = conn.execute("SELECT * FROM edges").fetchall()
         return [self._row_to_edge(row) for row in rows]
 
     def cook(self, node_id: str) -> CookResponse:
@@ -157,7 +182,11 @@ class GraphStore:
 
         def _resolve_supersedes(nid: str) -> str:
             current = nid
+            visited_nodes: set[str] = set()
             while True:
+                if current in visited_nodes:
+                    raise ValueError(f"Cycle detected at node {current}")
+                visited_nodes.add(current)
                 superseded = None
                 for edge in edges:
                     if (
