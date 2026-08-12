@@ -8,6 +8,7 @@ const MENU_LOCK := 2
 const MENU_SPAWN_COMPOSITE := 3
 const MENU_ADD_COMPOSITE_INPUT := 4
 const MENU_EDIT_COMPOSITE_TEMPLATE := 5
+const MENU_SPAWN_FILE_SOURCE := 6
 const MENU_EDGE_FIRST := 100
 
 var _http_workspace: HTTPRequest
@@ -34,6 +35,7 @@ var _template_dialog_node_id: String = ""
 
 var _node_data: Dictionary = {}
 var _textedits: Dictionary = {}
+var _lineedits: Dictionary = {}
 var _graphnodes: Dictionary = {}
 var _edge_data: Dictionary = {}
 
@@ -107,6 +109,7 @@ func _clear_graph():
 			child.queue_free()
 	_node_data.clear()
 	_textedits.clear()
+	_lineedits.clear()
 	_graphnodes.clear()
 	_edge_data.clear()
 
@@ -138,6 +141,16 @@ func _spawn_graph_node(node_dict: Dictionary):
 
 		for port in inputs:
 			_add_composite_input_row_to_graph_node(gn, str(port.get("name", "")), port_color)
+	elif ntype == "file_source":
+		var path_edit = LineEdit.new()
+		path_edit.text = content
+		path_edit.placeholder_text = "File path"
+		path_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		path_edit.custom_minimum_size = Vector2(200, 36)
+		gn.add_child(path_edit)
+		_lineedits[node_id] = path_edit
+		path_edit.focus_exited.connect(_on_file_path_focus_exited.bind(node_id))
+		gn.set_slot(0, false, 0, Color.WHITE, true, 0, port_color, null, null)
 	else:
 		var te = TextEdit.new()
 		te.text = content
@@ -202,6 +215,9 @@ func _apply_locked_style(node_id: String):
 	var te: TextEdit = _textedits.get(node_id)
 	if te:
 		te.editable = false
+	var path_edit: LineEdit = _lineedits.get(node_id)
+	if path_edit:
+		path_edit.editable = false
 	var panel = StyleBoxFlat.new()
 	panel.bg_color = Color(0.15, 0.35, 0.15, 1.0)
 	panel.border_width_left = 2
@@ -283,6 +299,7 @@ func _on_canvas_popup(at_position: Vector2):
 	_context_node_id = ""
 	_popup_menu.clear()
 	_popup_menu.add_item("Spawn Text Node", MENU_SPAWN_TEXT)
+	_popup_menu.add_item("Spawn File Source Node", MENU_SPAWN_FILE_SOURCE)
 	_popup_menu.add_item("Spawn Composite Node", MENU_SPAWN_COMPOSITE)
 	_popup_menu.position = get_screen_position() + at_position
 	_popup_menu.popup()
@@ -324,6 +341,8 @@ func _on_popup_action(id: int):
 	match id:
 		MENU_SPAWN_TEXT:
 			_spawn_new_node(_pending_spawn_position)
+		MENU_SPAWN_FILE_SOURCE:
+			_spawn_new_file_source_node(_pending_spawn_position)
 		MENU_SPAWN_COMPOSITE:
 			_spawn_new_composite_node(_pending_spawn_position)
 		MENU_COOK:
@@ -353,6 +372,27 @@ func _spawn_new_node(at_position: Vector2):
 	})
 	var headers = ["Content-Type: application/json"]
 	_http_node.request(BACKEND_URL + "/nodes", headers, HTTPClient.METHOD_POST, body)
+	_http_node.request_completed.connect(_on_node_created, CONNECT_ONE_SHOT)
+
+
+func _spawn_new_file_source_node(at_position: Vector2):
+	var body = JSON.stringify({
+		"type": "file_source",
+		"content": "",
+		"position": {"x": at_position.x, "y": at_position.y, "z": 0.0},
+		"inputs": [],
+		"outputs": [{"name": "text_out"}]
+	})
+	var headers = ["Content-Type: application/json"]
+	var error := _http_node.request(
+		BACKEND_URL + "/nodes",
+		headers,
+		HTTPClient.METHOD_POST,
+		body
+	)
+	if error != OK:
+		print("[Tendril] File source node request failed to start: ", error)
+		return
 	_http_node.request_completed.connect(_on_node_created, CONNECT_ONE_SHOT)
 
 
@@ -530,6 +570,60 @@ func _on_composite_template_patched(
 		return
 	_node_data[node_id]["inputs"] = synced_inputs
 	_node_data[node_id]["properties"] = synced_properties
+
+
+func _on_file_path_focus_exited(node_id: String):
+	var nd: Dictionary = _node_data.get(node_id, {})
+	if nd.get("is_locked", false):
+		return
+	var path_edit: LineEdit = _lineedits.get(node_id)
+	if path_edit == null:
+		return
+
+	var file_path := path_edit.text.strip_edges()
+	if file_path == str(nd.get("content", "")):
+		return
+
+	var body = JSON.stringify({
+		"type": "file_source",
+		"content": file_path,
+	})
+	var headers = ["Content-Type: application/json"]
+	var callback := _on_file_path_patched.bind(node_id, file_path)
+	_http_patch.request_completed.connect(callback, CONNECT_ONE_SHOT)
+	var error := _http_patch.request(
+		BACKEND_URL + "/nodes/" + node_id,
+		headers,
+		HTTPClient.METHOD_PATCH,
+		body
+	)
+	if error != OK:
+		_http_patch.request_completed.disconnect(callback)
+		print("[Tendril] File path PATCH failed to start: ", error)
+
+
+func _on_file_path_patched(
+	result,
+	response_code,
+	headers,
+	body,
+	node_id: String,
+	requested_path: String
+):
+	if response_code != 200:
+		print("[Tendril] File path PATCH failed: ", response_code, " - ", body.get_string_from_utf8())
+		return
+
+	var response_node = JSON.parse_string(body.get_string_from_utf8())
+	var synced_path := requested_path
+	if response_node is Dictionary:
+		synced_path = str(response_node.get("content", requested_path))
+
+	if _node_data.has(node_id):
+		_node_data[node_id]["content"] = synced_path
+	var path_edit: LineEdit = _lineedits.get(node_id)
+	if path_edit:
+		path_edit.text = synced_path
 
 
 func _on_textedit_focus_exited(node_id: String):
