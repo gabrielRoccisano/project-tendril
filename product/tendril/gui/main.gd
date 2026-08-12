@@ -9,6 +9,7 @@ const MENU_SPAWN_COMPOSITE := 3
 const MENU_ADD_COMPOSITE_INPUT := 4
 const MENU_EDIT_COMPOSITE_TEMPLATE := 5
 const MENU_SPAWN_FILE_SOURCE := 6
+const MENU_CLEAR_HIGHLIGHTS := 7
 const MENU_EDGE_FIRST := 100
 
 var _http_workspace: HTTPRequest
@@ -294,6 +295,21 @@ func _on_workspace_response(result, response_code, headers, body):
 		}
 
 
+func _apply_provenance_highlights(traversed_node_ids: Array):
+	for node_id in _graphnodes:
+		var gn: GraphNode = _graphnodes[node_id]
+		if node_id in traversed_node_ids:
+			gn.modulate = Color(1, 1, 1, 1)
+		else:
+			gn.modulate = Color(0.3, 0.3, 0.3, 0.3)
+
+
+func _clear_provenance_highlights():
+	for node_id in _graphnodes:
+		var gn: GraphNode = _graphnodes[node_id]
+		gn.modulate = Color(1, 1, 1, 1)
+
+
 func _on_canvas_popup(at_position: Vector2):
 	_pending_spawn_position = at_position
 	_context_node_id = ""
@@ -301,6 +317,8 @@ func _on_canvas_popup(at_position: Vector2):
 	_popup_menu.add_item("Spawn Text Node", MENU_SPAWN_TEXT)
 	_popup_menu.add_item("Spawn File Source Node", MENU_SPAWN_FILE_SOURCE)
 	_popup_menu.add_item("Spawn Composite Node", MENU_SPAWN_COMPOSITE)
+	_popup_menu.add_separator()
+	_popup_menu.add_item("Clear Highlights", MENU_CLEAR_HIGHLIGHTS)
 	_popup_menu.position = get_screen_position() + at_position
 	_popup_menu.popup()
 
@@ -345,6 +363,8 @@ func _on_popup_action(id: int):
 			_spawn_new_file_source_node(_pending_spawn_position)
 		MENU_SPAWN_COMPOSITE:
 			_spawn_new_composite_node(_pending_spawn_position)
+		MENU_CLEAR_HIGHLIGHTS:
+			_clear_provenance_highlights()
 		MENU_COOK:
 			if _context_node_id != "":
 				_cook_node(_context_node_id)
@@ -793,11 +813,15 @@ func _cook_node(node_id: String):
 func _on_cook_response(result, response_code, headers, body):
 	if response_code == 200:
 		var json = JSON.parse_string(body.get_string_from_utf8())
-		if json:
-			var compiled = str(json.get("compiled_text", ""))
+		if json is Dictionary:
+			var compiled: String = str(json.get("compiled_text", ""))
+			var traversed_node_ids: Array = json.get("traversed_node_ids", [])
+			_apply_provenance_highlights(traversed_node_ids)
 			print("[Tendril] Cook result:\n", compiled)
 			_show_cook_dialog(compiled)
 			_spawn_monitor_node(compiled)
+		else:
+			print("[Tendril] Invalid cook response JSON")
 	else:
 		print("[Tendril] Cook failed: ", response_code, " - ", body.get_string_from_utf8())
 
