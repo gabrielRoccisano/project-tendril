@@ -124,17 +124,38 @@ class GraphStore:
         return merged
 
     def add_edge(self, edge: Edge) -> Edge:
+        if edge.semantic_type == "supersedes":
+            raise ValueError("Supersedes edges can only be created by fork_node")
         if not edge.id:
             edge.id = str(uuid.uuid4())
+
         with self._connection() as conn:
-            if not conn.execute(
-                "SELECT 1 FROM nodes WHERE id = ?", (edge.source_node_id,)
-            ).fetchone():
+            source_row = conn.execute(
+                "SELECT * FROM nodes WHERE id = ?", (edge.source_node_id,)
+            ).fetchone()
+            if source_row is None:
                 raise KeyError(f"Source node {edge.source_node_id} not found")
-            if not conn.execute(
-                "SELECT 1 FROM nodes WHERE id = ?", (edge.target_node_id,)
-            ).fetchone():
+
+            target_row = conn.execute(
+                "SELECT * FROM nodes WHERE id = ?", (edge.target_node_id,)
+            ).fetchone()
+            if target_row is None:
                 raise KeyError(f"Target node {edge.target_node_id} not found")
+
+            source = self._row_to_node(source_row)
+            if edge.source_port_name not in {port.name for port in source.outputs}:
+                raise ValueError(
+                    f"Source port {edge.source_port_name} is not an output of node "
+                    f"{edge.source_node_id}"
+                )
+
+            target = self._row_to_node(target_row)
+            if edge.target_port_name not in {port.name for port in target.inputs}:
+                raise ValueError(
+                    f"Target port {edge.target_port_name} is not an input of node "
+                    f"{edge.target_node_id}"
+                )
+
             with conn:
                 conn.execute(
                     "INSERT INTO edges (id, source_node_id, source_port_name,"

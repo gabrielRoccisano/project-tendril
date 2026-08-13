@@ -53,7 +53,7 @@ async def update_node(node_id: str, node: NodePatch) -> Node:
 async def create_edge(edge: Edge) -> Edge:
     try:
         return store.add_edge(edge)
-    except KeyError as e:
+    except (KeyError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
