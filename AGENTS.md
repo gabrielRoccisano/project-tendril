@@ -468,6 +468,26 @@ Task reporting and runtime telemetry join through stable execution identity / Re
 
 Neither substitutes for the other.
 
+## Standardized Chat Handoff
+
+To maintain clarity in the primary build chat, every task response must end with a standardized handoff summary. After the task report is finalized and saved, the agent must output the following block as the final part of its chat response:
+
+```markdown
+--- 
+# CHAT HANDOFF SUMMARY
+
+**Current Plan Phase:** <P-number and name>
+**Task Completed:** <One-sentence summary of what this task achieved>
+**Execution Report:** <Report Number, e.g., R000084>
+
+## Next Step
+**Model:** <e.g., DeepSeek V4 Flash or GPT-Sol Pro High>
+**Effort:** <e.g., default or max>
+
+**Prompt to Execute:**
+```text
+<If a plan was created, paste the exact Executor Prompt to run it. If no next step is ready, state "Awaiting human direction".>
+
 ## Core Rules
 
 Every TASK is logged.
