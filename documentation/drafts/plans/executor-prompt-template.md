@@ -4,10 +4,10 @@ Replace every angle-bracket placeholder before issuing this prompt. Use DeepSeek
 
 ```text
 Task:
-<task-name>
+execute-plan-<plan-id>
 
 Objective:
-Implement the bounded plan at `documentation/drafts/plans/<plan-name>.md` exactly, verify the result, and create the authorized commit without pushing.
+Implement the bounded plan at `documentation/drafts/plans/PLAN-<6-digit-zero-padded-number>-<slug>.md` exactly, verify the result, and create the authorized commit without pushing.
 
 Plan Alignment:
 Manifest: documentation/main/PROJECT_BUILD_MANIFEST.md
@@ -17,7 +17,7 @@ Plan Alignment: <ALIGNED-or-HUMAN_OVERRIDE>
 
 Scope:
 Read:
-- documentation/drafts/plans/<plan-name>.md
+- documentation/drafts/plans/PLAN-<6-digit-zero-padded-number>-<slug>.md
 - <current-code-file-1>
 - <current-code-file-2>
 
@@ -42,7 +42,7 @@ Do not:
 Instructions:
 1. Initialize a new task report per current policy before substantive work.
 2. Read `documentation/main/PROJECT_BUILD_MANIFEST.md`, confirm Plan Phase, Plan Item, and Plan Alignment, and record them in the report.
-3. Read `documentation/drafts/plans/<plan-name>.md` completely.
+3. Read `documentation/drafts/plans/PLAN-<6-digit-zero-padded-number>-<slug>.md` completely.
 4. Read the current code files listed in Scope and confirm the plan's snippets and insertion points still match.
 5. Apply the exact snippets from the plan in the prescribed order.
 6. Do not invent missing code. If a snippet cannot be applied exactly and safely because current code or authority differs, report `BLOCKED`, state the conflict and minimum required decision, and stop without improvising.
@@ -56,7 +56,7 @@ Instructions:
 
 Verification:
 1. A new execution report was initialized for this task.
-2. Every implementation and verification step in `documentation/drafts/plans/<plan-name>.md` was executed or explicitly reported incomplete.
+2. Every implementation and verification step in `documentation/drafts/plans/PLAN-<6-digit-zero-padded-number>-<slug>.md` was executed or explicitly reported incomplete.
 3. No file outside the authorized scope was modified by this execution.
 4. The requested commit exists and contains only authorized files.
 5. No push was performed.

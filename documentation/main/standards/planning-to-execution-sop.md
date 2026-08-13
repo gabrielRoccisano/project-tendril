@@ -12,6 +12,14 @@ The plan is an execution instruction, not authority to bypass the current human 
 
 The Planner performs one reported planning execution.
 
+### Plan ID Protocol
+
+When GPT-Sol creates a new plan, it must read `runtime/plans/NEXT_PLAN_NUMBER`, allocate the next available number (for example, `1`), increment the counter file, and name the plan file `PLAN-<6-digit-zero-padded-number>-<slug>.md` (for example, `PLAN-000001-backend-validation.md`).
+
+The plan file must explicitly state `Plan ID: PLAN-<6-digit-zero-padded-number>` at the top.
+
+The Chat Handoff Summary must use this Plan ID in the `Task:` and `Prompt to Execute:` fields.
+
 1. Initialize a new task report under current policy.
 2. Read `documentation/main/PROJECT_BUILD_MANIFEST.md` and record Plan Phase, Plan Item, and Plan Alignment.
 3. Read the authorized audits and existing plans needed to identify unresolved work without duplicating it.
@@ -19,7 +27,7 @@ The Planner performs one reported planning execution.
    - a Critical or High unresolved audit finding, or
    - the next feature in the manifest's Current Focus.
 5. Read the relevant current code before prescribing changes.
-6. Write one plan at `documentation/drafts/plans/<plan-name>.md`.
+6. Write one plan at `documentation/drafts/plans/PLAN-<6-digit-zero-padded-number>-<slug>.md`.
 7. Include:
    - Objective
    - exact files to modify
