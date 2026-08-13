@@ -15,7 +15,6 @@ const MENU_EDGE_FIRST := 100
 var _popup_menu: PopupMenu
 var _context_node_id: String = ""
 var _pending_spawn_position: Vector2 = Vector2.ZERO
-var _cooking_node_id: String = ""
 
 var _port_name_dialog: AcceptDialog
 var _port_name_edit: LineEdit
@@ -31,6 +30,14 @@ var _lineedits: Dictionary = {}
 var _graphnodes: Dictionary = {}
 var _edge_data: Dictionary = {}
 var _pending_position_saves: Dictionary = {}
+
+var _workspace_revision := 0
+var _applied_workspace_revision := 0
+var _node_revisions: Dictionary = {}
+var _edge_revisions: Dictionary = {}
+var _suppress_editor_signals := false
+var _composite_mutation_queues: Dictionary = {}
+var _composite_mutation_active: Dictionary = {}
 
 
 func _ready():
@@ -48,6 +55,43 @@ func _ready():
 	fetch_workspace()
 
 
+func _next_node_revision(node_id: String) -> int:
+	var revision := int(_node_revisions.get(node_id, 0)) + 1
+	_node_revisions[node_id] = revision
+	return revision
+
+
+func _is_current_node_revision(node_id: String, revision: int) -> bool:
+	return int(_node_revisions.get(node_id, 0)) == revision
+
+
+func _next_edge_revision(edge_id: String) -> int:
+	var revision := int(_edge_revisions.get(edge_id, 0)) + 1
+	_edge_revisions[edge_id] = revision
+	return revision
+
+
+func _is_current_edge_revision(edge_id: String, revision: int) -> bool:
+	return int(_edge_revisions.get(edge_id, 0)) == revision
+
+
+func _request_failed(result: int, response_code: int) -> bool:
+	return result != HTTPRequest.RESULT_SUCCESS or response_code < 200 or response_code >= 300
+
+
+func _show_request_error(operation: String, result: int, response_code: int, body: PackedByteArray) -> void:
+	var detail := body.get_string_from_utf8().strip_edges()
+	if detail.is_empty():
+		detail = "Transport result %d, HTTP status %d" % [result, response_code]
+	var dialog := AcceptDialog.new()
+	dialog.title = operation + " failed"
+	dialog.dialog_text = detail
+	add_child(dialog)
+	dialog.confirmed.connect(dialog.queue_free, CONNECT_ONE_SHOT)
+	dialog.canceled.connect(dialog.queue_free, CONNECT_ONE_SHOT)
+	dialog.popup_centered()
+
+
 func _send_api_request(
 	url: String,
 	headers: Array,
@@ -56,6 +100,7 @@ func _send_api_request(
 	callback: Callable = Callable()
 ) -> void:
 	var request := HTTPRequest.new()
+	request.timeout = 15.0
 	add_child(request)
 	request.request_completed.connect(
 		_on_api_request_completed.bind(request, callback),
@@ -64,7 +109,8 @@ func _send_api_request(
 
 	var error := request.request(url, headers, method, body)
 	if error != OK:
-		print("[Tendril] API request failed to start: ", error, " - ", url)
+		if callback.is_valid():
+			callback.call(error, 0, PackedStringArray(), PackedByteArray())
 		request.queue_free()
 
 
@@ -81,8 +127,75 @@ func _on_api_request_completed(
 	request.queue_free()
 
 
-func fetch_workspace():
-	_send_api_request(BACKEND_URL + "/workspace", [], HTTPClient.METHOD_GET, "", _on_workspace_response)
+func fetch_workspace() -> void:
+	_workspace_revision += 1
+	var revision := _workspace_revision
+	_send_api_request(
+		BACKEND_URL + "/workspace",
+		[],
+		HTTPClient.METHOD_GET,
+		"",
+		_on_workspace_response.bind(revision)
+	)
+
+
+func _on_workspace_response(
+	result: int,
+	response_code: int,
+	headers: PackedStringArray,
+	body: PackedByteArray,
+	revision: int
+) -> void:
+	if _request_failed(result, response_code):
+		if revision == _workspace_revision:
+			_show_request_error("Workspace refresh", result, response_code, body)
+		return
+	if revision != _workspace_revision or revision <= _applied_workspace_revision:
+		return
+
+	var json = JSON.parse_string(body.get_string_from_utf8())
+	if not json is Dictionary:
+		_show_request_error("Workspace refresh", result, response_code, body)
+		return
+
+	_applied_workspace_revision = revision
+	_suppress_editor_signals = true
+	_clear_graph()
+
+	var nodes_data: Array = json.get("nodes", [])
+	var edges_data: Array = json.get("edges", [])
+	print("[Tendril] Workspace loaded: ", nodes_data.size(), " nodes, ", edges_data.size(), " edges")
+
+	for nd in nodes_data:
+		_spawn_graph_node(nd)
+
+	for ed in edges_data:
+		var source_node_id: String = str(ed.get("source_node_id", ""))
+		var target_node_id: String = str(ed.get("target_node_id", ""))
+		var source_port_index := _port_index_named(
+			source_node_id,
+			"outputs",
+			str(ed.get("source_port_name", ""))
+		)
+		var target_port_index := _port_index_named(
+			target_node_id,
+			"inputs",
+			str(ed.get("target_port_name", ""))
+		)
+		if source_port_index >= 0 and target_port_index >= 0:
+			connect_node(source_node_id, source_port_index, target_node_id, target_port_index)
+
+		var edge_id: String = str(ed.get("id", ""))
+		_edge_data[edge_id] = {
+			"id": edge_id,
+			"semantic_type": str(ed.get("semantic_type", "text")),
+			"source_node_id": source_node_id,
+			"source_port_name": str(ed.get("source_port_name", "")),
+			"target_node_id": target_node_id,
+			"target_port_name": str(ed.get("target_port_name", "")),
+		}
+
+	_suppress_editor_signals = false
 
 
 func _setup_composite_dialogs():
@@ -106,9 +219,12 @@ func _setup_composite_dialogs():
 	_template_dialog.confirmed.connect(_on_template_confirmed)
 
 
-func _clear_graph():
+func _clear_graph() -> void:
+	_pending_position_saves.clear()
+	_suppress_editor_signals = true
 	for child in get_children():
 		if child is GraphNode:
+			_disconnect_node_signals(child)
 			remove_child(child)
 			child.queue_free()
 	_node_data.clear()
@@ -116,6 +232,29 @@ func _clear_graph():
 	_lineedits.clear()
 	_graphnodes.clear()
 	_edge_data.clear()
+	_suppress_editor_signals = false
+
+
+func _connect_once(signal_object: Signal, callback: Callable) -> void:
+	if not signal_object.is_connected(callback):
+		signal_object.connect(callback)
+
+
+func _disconnect_if_connected(signal_object: Signal, callback: Callable) -> void:
+	if signal_object.is_connected(callback):
+		signal_object.disconnect(callback)
+
+
+func _disconnect_node_signals(gn: GraphNode) -> void:
+	var node_id := str(gn.name)
+	_disconnect_if_connected(gn.dragged, _on_graph_node_dragged.bind(node_id))
+	_disconnect_if_connected(gn.gui_input, _on_graph_node_input.bind(node_id))
+	var text_edit: TextEdit = _textedits.get(node_id)
+	if text_edit != null:
+		_disconnect_if_connected(text_edit.focus_exited, _on_textedit_focus_exited.bind(node_id))
+	var line_edit: LineEdit = _lineedits.get(node_id)
+	if line_edit != null:
+		_disconnect_if_connected(line_edit.focus_exited, _on_file_path_focus_exited.bind(node_id))
 
 
 func _spawn_graph_node(node_dict: Dictionary):
@@ -134,7 +273,7 @@ func _spawn_graph_node(node_dict: Dictionary):
 	gn.position_offset = Vector2(pos.get("x", 0.0), pos.get("y", 0.0))
 	gn.size = Vector2(240, 150)
 	gn.draggable = not is_locked
-	gn.dragged.connect(_on_graph_node_dragged.bind(node_id))
+	_connect_once(gn.dragged, _on_graph_node_dragged.bind(node_id))
 
 	var port_color: Color = Color(0.2, 0.8, 0.2) if is_locked else Color(0.8, 0.2, 0.2)
 	if ntype == "composite_text":
@@ -155,7 +294,7 @@ func _spawn_graph_node(node_dict: Dictionary):
 		path_edit.custom_minimum_size = Vector2(200, 36)
 		gn.add_child(path_edit)
 		_lineedits[node_id] = path_edit
-		path_edit.focus_exited.connect(_on_file_path_focus_exited.bind(node_id))
+		_connect_once(path_edit.focus_exited, _on_file_path_focus_exited.bind(node_id))
 		gn.set_slot(0, false, 0, Color.WHITE, true, 0, port_color, null, null)
 	else:
 		var te = TextEdit.new()
@@ -165,10 +304,10 @@ func _spawn_graph_node(node_dict: Dictionary):
 		te.custom_minimum_size = Vector2(200, 80)
 		gn.add_child(te)
 		_textedits[node_id] = te
-		te.focus_exited.connect(_on_textedit_focus_exited.bind(node_id))
+		_connect_once(te.focus_exited, _on_textedit_focus_exited.bind(node_id))
 		gn.set_slot(0, false, 0, Color.WHITE, true, 0, port_color, null, null)
 
-	gn.gui_input.connect(_on_graph_node_input.bind(node_id))
+	_connect_once(gn.gui_input, _on_graph_node_input.bind(node_id))
 
 	add_child(gn)
 	_graphnodes[node_id] = gn
@@ -197,22 +336,54 @@ func _add_composite_input_row_to_graph_node(gn: GraphNode, port_name: String, po
 	gn.set_slot(slot_index, true, 0, port_color, false, 0, Color.WHITE, null, null)
 
 
-func _rebuild_composite_input_rows(node_id: String):
+func _rebuild_composite_input_rows(node_id: String) -> void:
 	var gn: GraphNode = _graphnodes.get(node_id)
 	if gn == null:
 		return
+
+	var nd: Dictionary = _node_data.get(node_id, {})
+	var confirmed_inputs: Array = nd.get("inputs", [])
+	var confirmed_names: Dictionary = {}
+	for port in confirmed_inputs:
+		confirmed_names[str(port.get("name", ""))] = true
+
+	var to_disconnect: Array = []
+	for edge_id in _edge_data:
+		var ed: Dictionary = _edge_data[edge_id]
+		if str(ed.get("target_node_id", "")) != node_id:
+			continue
+		var target_port_name := str(ed.get("target_port_name", ""))
+		if target_port_name.is_empty() or not confirmed_names.has(target_port_name):
+			var source_node_id := str(ed.get("source_node_id", ""))
+			var source_port_index := _port_index_named(source_node_id, "outputs", str(ed.get("source_port_name", "")))
+			var target_port_index := _port_index_named(node_id, "inputs", target_port_name)
+			if source_port_index >= 0 and target_port_index >= 0:
+				to_disconnect.append([source_node_id, source_port_index, node_id, target_port_index])
+	for conn in to_disconnect:
+		if is_node_connected(conn[0], conn[1], conn[2], conn[3]):
+			disconnect_node(conn[0], conn[1], conn[2], conn[3])
 
 	for child in gn.get_children():
 		if child.has_meta("composite_input_row"):
 			gn.remove_child(child)
 			child.queue_free()
 
-	var nd: Dictionary = _node_data.get(node_id, {})
 	var port_color: Color = Color(0.2, 0.8, 0.2) if nd.get("is_locked", false) else Color(0.8, 0.2, 0.2)
-	for port in nd.get("inputs", []):
+	for port in confirmed_inputs:
 		_add_composite_input_row_to_graph_node(gn, str(port.get("name", "")), port_color)
 
-	gn.size.y = maxf(150.0, 90.0 + float(nd.get("inputs", []).size()) * 28.0)
+	gn.size.y = maxf(150.0, 90.0 + float(confirmed_inputs.size()) * 28.0)
+
+	for edge_id in _edge_data:
+		var ed: Dictionary = _edge_data[edge_id]
+		if str(ed.get("target_node_id", "")) != node_id:
+			continue
+		var source_node_id := str(ed.get("source_node_id", ""))
+		var source_port_index := _port_index_named(source_node_id, "outputs", str(ed.get("source_port_name", "")))
+		var target_port_index := _port_index_named(node_id, "inputs", str(ed.get("target_port_name", "")))
+		if source_port_index >= 0 and target_port_index >= 0:
+			if not is_node_connected(source_node_id, source_port_index, node_id, target_port_index):
+				connect_node(source_node_id, source_port_index, node_id, target_port_index)
 
 
 func _apply_locked_style(node_id: String):
@@ -237,7 +408,8 @@ func _apply_locked_style(node_id: String):
 	gn.add_theme_stylebox_override("panel_selected", panel)
 	gn.add_theme_stylebox_override("titlebar", panel)
 	gn.set_slot_color_right(0, Color(0.2, 0.8, 0.2))
-	gn.title = gn.title + " [BAKED]"
+	var base_title := _title_for_type(str(_node_data.get(node_id, {}).get("type", "")))
+	gn.title = base_title + " [BAKED]"
 
 	var nd: Dictionary = _node_data.get(node_id, {})
 	if nd.get("type", "") == "composite_text":
@@ -255,51 +427,6 @@ func _title_for_type(ntype: String) -> String:
 		"compression": return "Compression"
 		"monitor": return "Monitor"
 		_: return ntype
-
-
-func _on_workspace_response(result, response_code, headers, body):
-	if response_code != 200:
-		print("[Tendril] Workspace fetch failed: ", response_code)
-		return
-
-	var json = JSON.parse_string(body.get_string_from_utf8())
-	if json == null:
-		print("[Tendril] Invalid JSON response")
-		return
-
-	_clear_graph()
-
-	var nodes_data: Array = json.get("nodes", [])
-	var edges_data: Array = json.get("edges", [])
-	print("[Tendril] Workspace loaded: ", nodes_data.size(), " nodes, ", edges_data.size(), " edges")
-
-	for nd in nodes_data:
-		_spawn_graph_node(nd)
-
-	for ed in edges_data:
-		var source_node_id: String = str(ed.get("source_node_id", ""))
-		var target_node_id: String = str(ed.get("target_node_id", ""))
-		var source_port_index := _port_index_named(
-			source_node_id,
-			"outputs",
-			str(ed.get("source_port_name", ""))
-		)
-		var target_port_index := _port_index_named(
-			target_node_id,
-			"inputs",
-			str(ed.get("target_port_name", ""))
-		)
-		if source_port_index >= 0 and target_port_index >= 0:
-			connect_node(source_node_id, source_port_index, target_node_id, target_port_index)
-
-		var edge_id: String = str(ed.get("id", ""))
-		var key: String = source_node_id + "|" + target_node_id
-		_edge_data[key] = {
-			"id": edge_id,
-			"semantic_type": str(ed.get("semantic_type", "text")),
-			"source_node_id": source_node_id,
-			"target_node_id": target_node_id,
-		}
 
 
 func _apply_provenance_highlights(traversed_node_ids: Array):
@@ -467,48 +594,7 @@ func _on_port_name_confirmed():
 			_port_name_dialog.call_deferred("popup_centered", Vector2i(360, 120))
 			return
 
-	updated_inputs.append({"name": port_name})
-	var updated_properties: Dictionary = nd.get("properties", {}).duplicate(true)
-	var body = JSON.stringify({
-		"type": "composite_text",
-		"inputs": updated_inputs,
-		"properties": updated_properties,
-	})
-	var headers = ["Content-Type: application/json"]
-	_send_api_request(
-		BACKEND_URL + "/nodes/" + node_id,
-		headers,
-		HTTPClient.METHOD_PATCH,
-		body,
-		_on_composite_inputs_patched.bind(node_id, updated_inputs, updated_properties)
-	)
-
-
-func _on_composite_inputs_patched(
-	result,
-	response_code,
-	headers,
-	body,
-	node_id: String,
-	requested_inputs: Array,
-	requested_properties: Dictionary
-):
-	if response_code != 200:
-		print("[Tendril] Composite input PATCH failed: ", response_code, " - ", body.get_string_from_utf8())
-		return
-
-	var response_node = JSON.parse_string(body.get_string_from_utf8())
-	var synced_inputs: Array = requested_inputs.duplicate(true)
-	var synced_properties: Dictionary = requested_properties.duplicate(true)
-	if response_node is Dictionary:
-		synced_inputs = response_node.get("inputs", requested_inputs).duplicate(true)
-		synced_properties = response_node.get("properties", requested_properties).duplicate(true)
-
-	if not _node_data.has(node_id):
-		return
-	_node_data[node_id]["inputs"] = synced_inputs
-	_node_data[node_id]["properties"] = synced_properties
-	_rebuild_composite_input_rows(node_id)
+	_enqueue_composite_mutation(node_id, {"kind": "add_input", "port_name": port_name})
 
 
 func _show_template_dialog(node_id: String):
@@ -528,121 +614,156 @@ func _on_template_confirmed():
 	if nd.get("type", "") != "composite_text" or nd.get("is_locked", false):
 		return
 
-	var updated_inputs: Array = nd.get("inputs", []).duplicate(true)
-	var updated_properties: Dictionary = nd.get("properties", {}).duplicate(true)
-	updated_properties["template"] = _template_edit.text
-	var body = JSON.stringify({
-		"type": "composite_text",
-		"inputs": updated_inputs,
-		"properties": updated_properties,
-	})
-	var headers = ["Content-Type: application/json"]
-	_send_api_request(
-		BACKEND_URL + "/nodes/" + node_id,
-		headers,
-		HTTPClient.METHOD_PATCH,
-		body,
-		_on_composite_template_patched.bind(node_id, updated_inputs, updated_properties)
-	)
+	_enqueue_composite_mutation(node_id, {"kind": "set_template", "template": _template_edit.text})
 
 
-func _on_composite_template_patched(
-	result,
-	response_code,
-	headers,
-	body,
-	node_id: String,
-	requested_inputs: Array,
-	requested_properties: Dictionary
-):
-	if response_code != 200:
-		print("[Tendril] Composite template PATCH failed: ", response_code, " - ", body.get_string_from_utf8())
+func _enqueue_composite_mutation(node_id: String, mutation: Dictionary) -> void:
+	var queue: Array = _composite_mutation_queues.get(node_id, [])
+	queue.append(mutation)
+	_composite_mutation_queues[node_id] = queue
+	_start_next_composite_mutation(node_id)
+
+
+func _start_next_composite_mutation(node_id: String) -> void:
+	if _composite_mutation_active.get(node_id, false):
 		return
-
-	var response_node = JSON.parse_string(body.get_string_from_utf8())
-	var synced_inputs: Array = requested_inputs.duplicate(true)
-	var synced_properties: Dictionary = requested_properties.duplicate(true)
-	if response_node is Dictionary:
-		synced_inputs = response_node.get("inputs", requested_inputs).duplicate(true)
-		synced_properties = response_node.get("properties", requested_properties).duplicate(true)
-
-	if not _node_data.has(node_id):
+	var queue: Array = _composite_mutation_queues.get(node_id, [])
+	if queue.is_empty():
 		return
-	_node_data[node_id]["inputs"] = synced_inputs
-	_node_data[node_id]["properties"] = synced_properties
-
-
-func _on_file_path_focus_exited(node_id: String):
 	var nd: Dictionary = _node_data.get(node_id, {})
-	if nd.get("is_locked", false):
+	if nd.is_empty() or nd.get("is_locked", false):
+		_composite_mutation_queues[node_id] = []
 		return
+	var mutation: Dictionary = queue.pop_front()
+	_composite_mutation_queues[node_id] = queue
+	var inputs: Array = nd.get("inputs", []).duplicate(true)
+	var properties: Dictionary = nd.get("properties", {}).duplicate(true)
+	if mutation["kind"] == "add_input":
+		inputs.append({"name": mutation["port_name"]})
+	else:
+		properties["template"] = mutation["template"]
+	_composite_mutation_active[node_id] = true
+	var revision := _next_node_revision(node_id)
+	var body := JSON.stringify({"type": "composite_text", "inputs": inputs, "properties": properties})
+	_send_api_request(BACKEND_URL + "/nodes/" + node_id, ["Content-Type: application/json"], HTTPClient.METHOD_PATCH, body, _on_composite_mutation_response.bind(node_id, revision))
+
+
+func _on_composite_mutation_response(result: int, response_code: int, headers: PackedStringArray, body: PackedByteArray, node_id: String, revision: int) -> void:
+	_composite_mutation_active.erase(node_id)
+	if not _is_current_node_revision(node_id, revision):
+		_start_next_composite_mutation(node_id)
+		return
+	if _request_failed(result, response_code):
+		_show_request_error("Composite update", result, response_code, body)
+		_start_next_composite_mutation(node_id)
+		return
+	var response_node = JSON.parse_string(body.get_string_from_utf8())
+	if not response_node is Dictionary:
+		fetch_workspace()
+		return
+	_node_data[node_id]["inputs"] = response_node.get("inputs", []).duplicate(true)
+	_node_data[node_id]["properties"] = response_node.get("properties", {}).duplicate(true)
+	_rebuild_composite_input_rows(node_id)
+	_start_next_composite_mutation(node_id)
+
+
+func _on_file_path_focus_exited(node_id: String) -> void:
+	if _suppress_editor_signals:
+		return
+	var nd: Dictionary = _node_data.get(node_id, {})
 	var path_edit: LineEdit = _lineedits.get(node_id)
-	if path_edit == null:
+	if nd.is_empty() or path_edit == null or nd.get("is_locked", false):
 		return
 
+	var previous_path := str(nd.get("content", ""))
 	var file_path := path_edit.text.strip_edges()
-	if file_path == str(nd.get("content", "")):
+	if file_path == previous_path:
 		return
 
+	var revision := _next_node_revision(node_id)
 	var body = JSON.stringify({
 		"type": "file_source",
 		"content": file_path,
 	})
-	var headers = ["Content-Type: application/json"]
 	_send_api_request(
 		BACKEND_URL + "/nodes/" + node_id,
-		headers,
+		["Content-Type: application/json"],
 		HTTPClient.METHOD_PATCH,
 		body,
-		_on_file_path_patched.bind(node_id, file_path)
+		_on_file_path_patched.bind(node_id, revision, previous_path)
 	)
 
 
-func _on_file_path_patched(
-	result,
-	response_code,
-	headers,
-	body,
-	node_id: String,
-	requested_path: String
-):
-	if response_code != 200:
-		print("[Tendril] File path PATCH failed: ", response_code, " - ", body.get_string_from_utf8())
+func _on_file_path_patched(result: int, response_code: int, headers: PackedStringArray, body: PackedByteArray, node_id: String, revision: int, previous_path: String) -> void:
+	if not _is_current_node_revision(node_id, revision):
 		return
-
-	var response_node = JSON.parse_string(body.get_string_from_utf8())
-	var synced_path := requested_path
-	if response_node is Dictionary:
-		synced_path = str(response_node.get("content", requested_path))
-
-	if _node_data.has(node_id):
-		_node_data[node_id]["content"] = synced_path
 	var path_edit: LineEdit = _lineedits.get(node_id)
-	if path_edit:
-		path_edit.text = synced_path
+	if _request_failed(result, response_code):
+		if path_edit != null:
+			path_edit.text = previous_path
+		_show_request_error("File path update", result, response_code, body)
+		return
+	var response_node = JSON.parse_string(body.get_string_from_utf8())
+	if not response_node is Dictionary or not response_node.has("content"):
+		fetch_workspace()
+		return
+	var confirmed_path := str(response_node["content"])
+	_node_data[node_id]["content"] = confirmed_path
+	if path_edit != null:
+		path_edit.text = confirmed_path
 
 
-func _on_textedit_focus_exited(node_id: String):
+func _on_textedit_focus_exited(node_id: String) -> void:
+	if _suppress_editor_signals:
+		return
 	var nd: Dictionary = _node_data.get(node_id, {})
-	if nd.get("is_locked", false):
+	var text_edit: TextEdit = _textedits.get(node_id)
+	if nd.is_empty() or text_edit == null or nd.get("is_locked", false):
 		return
-	var te: TextEdit = _textedits.get(node_id)
-	if te == null:
+	var previous_content := str(nd.get("content", ""))
+	var requested_content := text_edit.text
+	if requested_content == previous_content:
 		return
-	var body = JSON.stringify({"type": nd.get("type", "text_source"), "content": te.text})
-	var headers = ["Content-Type: application/json"]
+	var revision := _next_node_revision(node_id)
+	var body := JSON.stringify({"type": nd.get("type", "text_source"), "content": requested_content})
 	_send_api_request(
 		BACKEND_URL + "/nodes/" + node_id,
-		headers,
+		["Content-Type: application/json"],
 		HTTPClient.METHOD_PATCH,
 		body,
-		_on_patch_response
+		_on_text_patched.bind(node_id, revision, previous_content)
 	)
 
 
-func _on_patch_response(result, response_code, headers, body):
-	if response_code != 200:
-		print("[Tendril] PATCH failed: ", response_code, " - ", body.get_string_from_utf8())
+func _on_text_patched(
+	result: int,
+	response_code: int,
+	headers: PackedStringArray,
+	body: PackedByteArray,
+	node_id: String,
+	revision: int,
+	previous_content: String
+) -> void:
+	if not _is_current_node_revision(node_id, revision):
+		return
+	if _request_failed(result, response_code):
+		var text_edit: TextEdit = _textedits.get(node_id)
+		if text_edit != null:
+			_suppress_editor_signals = true
+			text_edit.text = previous_content
+			_suppress_editor_signals = false
+		_show_request_error("Text update", result, response_code, body)
+		return
+	var response_node = JSON.parse_string(body.get_string_from_utf8())
+	if not response_node is Dictionary or not response_node.has("content"):
+		fetch_workspace()
+		return
+	_node_data[node_id]["content"] = str(response_node["content"])
+	var text_edit: TextEdit = _textedits.get(node_id)
+	if text_edit != null:
+		_suppress_editor_signals = true
+		text_edit.text = str(response_node["content"])
+		_suppress_editor_signals = false
 
 
 func _on_graph_node_dragged(_from: Vector2, to: Vector2, node_id: String) -> void:
@@ -661,36 +782,38 @@ func _on_end_node_move() -> void:
 
 
 func _patch_node_position(node_id: String, position: Vector2) -> void:
+	var previous_position: Dictionary = _node_data.get(node_id, {}).get("position", {}).duplicate(true)
+	var revision := _next_node_revision(node_id)
 	var body := JSON.stringify({
 		"position": {"x": position.x, "y": position.y, "z": 0.0},
 	})
-	var headers = ["Content-Type: application/json"]
 	_send_api_request(
 		BACKEND_URL + "/nodes/" + node_id,
-		headers,
+		["Content-Type: application/json"],
 		HTTPClient.METHOD_PATCH,
 		body,
-		_on_node_position_patched.bind(node_id, position)
+		_on_node_position_patched.bind(node_id, revision, previous_position)
 	)
 
 
-func _on_node_position_patched(
-	result: int,
-	response_code: int,
-	headers: PackedStringArray,
-	body: PackedByteArray,
-	node_id: String,
-	requested_position: Vector2
-) -> void:
-	if response_code != 200:
-		print("[Tendril] Position PATCH failed: ", response_code, " - ", body.get_string_from_utf8())
+func _on_node_position_patched(result: int, response_code: int, headers: PackedStringArray, body: PackedByteArray, node_id: String, revision: int, previous_position: Dictionary) -> void:
+	if not _is_current_node_revision(node_id, revision):
 		return
-	if _node_data.has(node_id):
-		_node_data[node_id]["position"] = {
-			"x": requested_position.x,
-			"y": requested_position.y,
-			"z": 0.0,
-		}
+	if _request_failed(result, response_code):
+		var graph_node: GraphNode = _graphnodes.get(node_id)
+		if graph_node != null:
+			graph_node.position_offset = Vector2(previous_position.get("x", 0.0), previous_position.get("y", 0.0))
+		_show_request_error("Position update", result, response_code, body)
+		return
+	var response_node = JSON.parse_string(body.get_string_from_utf8())
+	if not response_node is Dictionary or not response_node.get("position") is Dictionary:
+		fetch_workspace()
+		return
+	var confirmed_position: Dictionary = response_node["position"]
+	_node_data[node_id]["position"] = confirmed_position.duplicate(true)
+	var graph_node: GraphNode = _graphnodes.get(node_id)
+	if graph_node != null:
+		graph_node.position_offset = Vector2(confirmed_position.get("x", 0.0), confirmed_position.get("y", 0.0))
 
 
 func _port_name_at(node_id: String, collection: String, port_index: int) -> String:
@@ -737,28 +860,31 @@ func _on_edge_created(result, response_code, headers, body):
 	fetch_workspace()
 
 
-func _lock_node(node_id: String):
-	var nd: Dictionary = _node_data.get(node_id, {})
-	var body = JSON.stringify({
-		"type": nd.get("type", "text_source"),
-		"content": nd.get("content", ""),
-		"is_locked": true
-	})
-	var headers = ["Content-Type: application/json"]
+func _lock_node(node_id: String) -> void:
+	if not _node_data.has(node_id) or _node_data[node_id].get("is_locked", false):
+		return
+	var revision := _next_node_revision(node_id)
 	_send_api_request(
 		BACKEND_URL + "/nodes/" + node_id,
-		headers,
+		["Content-Type: application/json"],
 		HTTPClient.METHOD_PATCH,
-		body,
-		_on_lock_response.bind(node_id)
+		JSON.stringify({"is_locked": true}),
+		_on_lock_response.bind(node_id, revision)
 	)
 
 
-func _on_lock_response(result, response_code, headers, body, node_id: String):
-	if response_code != 200:
-		print("[Tendril] Lock failed: ", response_code, " - ", body.get_string_from_utf8())
+func _on_lock_response(result: int, response_code: int, headers: PackedStringArray, body: PackedByteArray, node_id: String, revision: int) -> void:
+	if not _is_current_node_revision(node_id, revision):
 		return
-	_node_data[node_id]["is_locked"] = true
+	if _request_failed(result, response_code):
+		_show_request_error("Lock", result, response_code, body)
+		return
+	var response_node = JSON.parse_string(body.get_string_from_utf8())
+	if not response_node is Dictionary:
+		fetch_workspace()
+		return
+	for key in response_node:
+		_node_data[node_id][key] = response_node[key]
 	_apply_locked_style(node_id)
 
 
@@ -775,34 +901,30 @@ func _toggle_edge_by_menu_index(source_node_id: String, menu_index: int):
 			idx += 1
 
 
-func _toggle_edge_type(edge_id: String, new_semantic_type: String):
-	var body = JSON.stringify({
-		"source_node_id": "",
-		"source_port_name": "",
-		"target_node_id": "",
-		"target_port_name": "",
-		"semantic_type": new_semantic_type
-	})
-	var headers = ["Content-Type: application/json"]
+func _toggle_edge_type(edge_id: String, new_semantic_type: String) -> void:
+	if not _edge_data.has(edge_id):
+		return
+	var revision := _next_edge_revision(edge_id)
 	_send_api_request(
 		BACKEND_URL + "/edges/" + edge_id,
-		headers,
+		["Content-Type: application/json"],
 		HTTPClient.METHOD_PATCH,
-		body,
-		_on_edge_toggle_response.bind(edge_id, new_semantic_type)
+		JSON.stringify({"semantic_type": new_semantic_type}),
+		_on_edge_toggle_response.bind(edge_id, revision)
 	)
 
 
-func _on_edge_toggle_response(result, response_code, headers, body, edge_id: String, new_type: String):
-	if response_code == 200:
-		for key in _edge_data:
-			var ed: Dictionary = _edge_data[key]
-			if ed.get("id", "") == edge_id:
-				ed["semantic_type"] = new_type
-				break
-		print("[Tendril] Edge ", edge_id, " toggled to ", new_type)
-	else:
-		print("[Tendril] Edge toggle failed: ", response_code, " - ", body.get_string_from_utf8())
+func _on_edge_toggle_response(result: int, response_code: int, headers: PackedStringArray, body: PackedByteArray, edge_id: String, revision: int) -> void:
+	if not _is_current_edge_revision(edge_id, revision):
+		return
+	if _request_failed(result, response_code):
+		_show_request_error("Edge semantic update", result, response_code, body)
+		return
+	var response_edge = JSON.parse_string(body.get_string_from_utf8())
+	if not response_edge is Dictionary:
+		fetch_workspace()
+		return
+	_edge_data[edge_id] = response_edge.duplicate(true)
 
 
 func _fork_node(node_id: String):
@@ -815,90 +937,63 @@ func _fork_node(node_id: String):
 	)
 
 
-func _on_fork_response(result, response_code, headers, body, original_id: String):
-	if response_code != 201:
-		print("[Tendril] Fork failed: ", response_code, " - ", body.get_string_from_utf8())
+func _on_fork_response(result: int, response_code: int, headers: PackedStringArray, body: PackedByteArray, original_id: String) -> void:
+	if _request_failed(result, response_code):
+		_show_request_error("Fork", result, response_code, body)
+		return
+	fetch_workspace()
+
+
+func _cook_node(node_id: String) -> void:
+	_send_api_request(BACKEND_URL + "/nodes/" + node_id + "/cook", [], HTTPClient.METHOD_POST, "", _on_cook_response.bind(node_id))
+
+
+func _on_cook_response(result: int, response_code: int, headers: PackedStringArray, body: PackedByteArray, source_node_id: String) -> void:
+	if _request_failed(result, response_code):
+		_show_request_error("Cook", result, response_code, body)
 		return
 	var json = JSON.parse_string(body.get_string_from_utf8())
-	if json == null:
+	if not json is Dictionary:
+		fetch_workspace()
 		return
-	var original_gn: GraphNode = _graphnodes.get(original_id)
-	if original_gn:
-		json["position"] = {
-			"x": original_gn.position_offset.x + 300.0,
-			"y": original_gn.position_offset.y,
-			"z": 0.0
-		}
-	_spawn_graph_node(json)
-	connect_node(original_id, 0, str(json.get("id", "")), 0)
+	_apply_provenance_highlights(json.get("traversed_node_ids", []))
+	var compiled := str(json.get("compiled_text", ""))
+	_show_cook_dialog(compiled)
+	_spawn_monitor_node(source_node_id, compiled)
 
 
-func _cook_node(node_id: String):
-	_cooking_node_id = node_id
-	_send_api_request(
-		BACKEND_URL + "/nodes/" + node_id + "/cook",
-		[],
-		HTTPClient.METHOD_POST,
-		"",
-		_on_cook_response
-	)
+func _spawn_monitor_node(source_node_id: String, compiled_text: String) -> void:
+	var source_graph_node: GraphNode = _graphnodes.get(source_node_id)
+	var position := source_graph_node.position_offset if source_graph_node != null else Vector2.ZERO
+	var body := JSON.stringify({"type": "monitor", "content": compiled_text, "position": {"x": position.x + 300.0, "y": position.y, "z": 0.0}, "inputs": [{"name": "text_in"}], "outputs": []})
+	_send_api_request(BACKEND_URL + "/nodes", ["Content-Type: application/json"], HTTPClient.METHOD_POST, body, _on_monitor_created.bind(source_node_id))
 
 
-func _on_cook_response(result, response_code, headers, body):
-	if response_code == 200:
-		var json = JSON.parse_string(body.get_string_from_utf8())
-		if json is Dictionary:
-			var compiled: String = str(json.get("compiled_text", ""))
-			var traversed_node_ids: Array = json.get("traversed_node_ids", [])
-			_apply_provenance_highlights(traversed_node_ids)
-			print("[Tendril] Cook result:\n", compiled)
-			_show_cook_dialog(compiled)
-			_spawn_monitor_node(compiled)
-		else:
-			print("[Tendril] Invalid cook response JSON")
-	else:
-		print("[Tendril] Cook failed: ", response_code, " - ", body.get_string_from_utf8())
-
-
-func _spawn_monitor_node(compiled_text: String):
-	var original_gn: GraphNode = _graphnodes.get(_cooking_node_id)
-	var pos_x: float = 0.0
-	var pos_y: float = 0.0
-	if original_gn:
-		pos_x = original_gn.position_offset.x + 300.0
-		pos_y = original_gn.position_offset.y
-
-	var body = JSON.stringify({
-		"type": "monitor",
-		"content": compiled_text,
-		"position": {"x": pos_x, "y": pos_y, "z": 0.0},
-		"inputs": [{"name": "text_in"}],
-		"outputs": []
+func _on_monitor_created(result: int, response_code: int, headers: PackedStringArray, body: PackedByteArray, source_node_id: String) -> void:
+	if _request_failed(result, response_code):
+		_show_request_error("Monitor creation", result, response_code, body)
+		return
+	var json = JSON.parse_string(body.get_string_from_utf8())
+	if not json is Dictionary:
+		fetch_workspace()
+		return
+	var target_node_id := str(json.get("id", ""))
+	if target_node_id.is_empty():
+		fetch_workspace()
+		return
+	var source_port_name := _port_name_at(source_node_id, "outputs", 0)
+	if source_port_name.is_empty():
+		fetch_workspace()
+		return
+	var edge_body = JSON.stringify({
+		"source_node_id": source_node_id,
+		"source_port_name": source_port_name,
+		"target_node_id": target_node_id,
+		"target_port_name": "text_in",
+		"semantic_type": "text"
 	})
-	var headers = ["Content-Type: application/json"]
-	_send_api_request(BACKEND_URL + "/nodes", headers, HTTPClient.METHOD_POST, body, _on_monitor_created)
-
-
-func _on_monitor_created(result, response_code, headers, body):
-	if response_code != 201:
-		print("[Tendril] Monitor creation failed: ", response_code)
-		return
-	var json = JSON.parse_string(body.get_string_from_utf8())
-	if json == null:
-		return
-	_spawn_graph_node(json)
-	if _cooking_node_id != "":
-		connect_node(_cooking_node_id, 0, str(json.get("id", "")), 0)
-		var source_port_name := _port_name_at(_cooking_node_id, "outputs", 0)
-		var edge_body = JSON.stringify({
-			"source_node_id": _cooking_node_id,
-			"source_port_name": source_port_name,
-			"target_node_id": str(json.get("id", "")),
-			"target_port_name": "text_in",
-			"semantic_type": "text"
-		})
-		var req_headers = ["Content-Type: application/json"]
-		_send_api_request(BACKEND_URL + "/edges", req_headers, HTTPClient.METHOD_POST, edge_body, _on_edge_created)
+	var req_headers = ["Content-Type: application/json"]
+	_send_api_request(BACKEND_URL + "/edges", req_headers, HTTPClient.METHOD_POST, edge_body, _on_edge_created)
 
 
 func _show_cook_dialog(text: String):
@@ -911,4 +1006,5 @@ func _show_cook_dialog(text: String):
 	dialog.add_child(label)
 	add_child(dialog)
 	dialog.popup_centered()
-	dialog.confirmed.connect(dialog.queue_free)
+	dialog.confirmed.connect(dialog.queue_free, CONNECT_ONE_SHOT)
+	dialog.canceled.connect(dialog.queue_free, CONNECT_ONE_SHOT)
