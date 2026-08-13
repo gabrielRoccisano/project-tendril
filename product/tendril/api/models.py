@@ -41,8 +41,8 @@ class Node(BaseModel):
 
 
 SemanticType = Literal[
-    "narrative_context",
-    "stable_reference",
+    "text",
+    "memory_consolidation",
     "supersedes",
 ]
 

@@ -96,27 +96,31 @@ class GraphStore:
         return self._row_to_node(row)
 
     def update_node(self, node_id: str, patch: dict) -> Node:
-        existing = self.get_node(node_id)
-        if existing.is_locked:
-            raise ValueError(f"Node {node_id} is locked")
-
-        merged = existing.model_copy(deep=True)
-        patch_data = patch.copy()
-        if "position" in patch_data:
-            merged.position = Position3D.model_validate(patch_data.pop("position"))
-
-        for field, value in patch_data.items():
-            setattr(merged, field, value)
-        merged.id = node_id
-
         with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM nodes WHERE id = ?", (node_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Node {node_id} is locked or not found")
+
+            merged = self._row_to_node(row)
+            patch_data = patch.copy()
+            if "position" in patch_data:
+                merged.position = Position3D.model_validate(patch_data.pop("position"))
+
+            for field, value in patch_data.items():
+                setattr(merged, field, value)
+            merged.id = node_id
+
             with conn:
-                conn.execute(
+                cursor = conn.execute(
                     "UPDATE nodes SET type = ?, is_locked = ?, position_x = ?,"
                     " position_y = ?, position_z = ?, inputs = ?, outputs = ?,"
-                    " properties = ?, content = ? WHERE id = ?",
+                    " properties = ?, content = ? WHERE id = ? AND is_locked = 0",
                     (*self._node_to_row(merged)[1:], node_id),
                 )
+                if cursor.rowcount == 0:
+                    raise ValueError(f"Node {node_id} is locked or not found")
         return merged
 
     def add_edge(self, edge: Edge) -> Edge:
@@ -244,7 +248,7 @@ class GraphStore:
                             if edge.id not in traversed_edges:
                                 traversed_edges.append(edge.id)
                             raw = _cook_node(edge.source_node_id)
-                            if edge.semantic_type == "stable_reference":
+                            if edge.semantic_type == "memory_consolidation":
                                 text = "> " + raw + "\n"
                             else:
                                 text = raw
@@ -274,23 +278,39 @@ class GraphStore:
         )
 
     def fork_node(self, node_id: str) -> Node:
-        original = self.get_node(node_id)
-        new_node = original.model_copy(deep=True)
-        new_node.id = str(uuid.uuid4())
-        new_node.is_locked = False
-        self.add_node(new_node)
+        with self._connection() as conn:
+            with conn:
+                row = conn.execute(
+                    "SELECT * FROM nodes WHERE id = ?", (node_id,)
+                ).fetchone()
+                if row is None:
+                    raise KeyError(f"Node {node_id} not found")
 
-        source_port = original.outputs[0].name if original.outputs else "text_out"
-        target_port = new_node.inputs[0].name if new_node.inputs else "text_in"
+                original = self._row_to_node(row)
+                new_node = original.model_copy(deep=True)
+                new_node.id = str(uuid.uuid4())
+                new_node.is_locked = False
+                conn.execute(
+                    "INSERT INTO nodes (id, type, is_locked, position_x, position_y,"
+                    " position_z, inputs, outputs, properties, content)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    self._node_to_row(new_node),
+                )
 
-        supersedes_edge = Edge(
-            id=str(uuid.uuid4()),
-            source_node_id=original.id,
-            source_port_name=source_port,
-            target_node_id=new_node.id,
-            target_port_name=target_port,
-            semantic_type="supersedes",
-        )
-        self.add_edge(supersedes_edge)
+                source_port = original.outputs[0].name if original.outputs else "text_out"
+                target_port = new_node.inputs[0].name if new_node.inputs else "text_in"
+                conn.execute(
+                    "INSERT INTO edges (id, source_node_id, source_port_name,"
+                    " target_node_id, target_port_name, semantic_type)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        str(uuid.uuid4()),
+                        original.id,
+                        source_port,
+                        new_node.id,
+                        target_port,
+                        "supersedes",
+                    ),
+                )
 
         return new_node
