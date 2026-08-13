@@ -171,6 +171,16 @@ If a command or tool requires a path outside the project root, the agent must st
 
 Violating the project perimeter is a critical execution boundary failure.
 
+### Internal Temporary Directory
+
+The agent must not write to `/tmp`, `/var/tmp`, or any system temporary directory.
+
+All temporary files, script outputs, and ephemeral artifacts must be written to:
+
+`/home/gabriel/project-tendril/runtime/working/`
+
+This ensures all agent activity remains strictly within the inspectable project perimeter.
+
 # Mandatory Execution Logging
 
 Logging is part of execution validity.

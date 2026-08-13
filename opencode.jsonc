@@ -8,7 +8,11 @@
     "edit": "allow",
     "glob": "allow",
     "grep": "allow",
-    "bash": "allow",
+    "bash": {
+      "*": "allow",
+      "*/tmp*": "deny",
+      "*/var/tmp*": "deny"
+    },
 
     "external_directory": "deny",
     "task": "deny",
