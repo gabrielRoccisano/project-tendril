@@ -11,6 +11,12 @@ const MENU_EDIT_COMPOSITE_TEMPLATE := 5
 const MENU_SPAWN_FILE_SOURCE := 6
 const MENU_CLEAR_HIGHLIGHTS := 7
 const MENU_EDGE_FIRST := 100
+const MENU_EDGE_DELETE_FIRST := 200
+const TEXT_EDGE_COLOR := Color(0.8, 0.2, 0.2)
+const MEMORY_EDGE_COLOR := Color(0.2, 0.8, 0.2)
+const TEXT_EDGE_WIDTH := 2.0
+const MEMORY_EDGE_WIDTH := 5.0
+const TEXT_EDGE_DASH_LENGTH := 8.0
 
 var _popup_menu: PopupMenu
 var _context_node_id: String = ""
@@ -29,6 +35,8 @@ var _textedits: Dictionary = {}
 var _lineedits: Dictionary = {}
 var _graphnodes: Dictionary = {}
 var _edge_data: Dictionary = {}
+var _edge_menu_ids: Dictionary = {}
+var _edge_delete_menu_ids: Dictionary = {}
 var _pending_position_saves: Dictionary = {}
 
 var _workspace_revision := 0
@@ -41,6 +49,8 @@ var _composite_mutation_active: Dictionary = {}
 
 
 func _ready():
+	add_theme_color_override("connection_color", Color(0, 0, 0, 0))
+	right_disconnects = true
 	_popup_menu = PopupMenu.new()
 	_popup_menu.name = "ContextMenu"
 	_popup_menu.id_pressed.connect(_on_popup_action)
@@ -49,6 +59,7 @@ func _ready():
 	_setup_composite_dialogs()
 
 	connection_request.connect(_on_connection_request)
+	disconnection_request.connect(_on_disconnection_request)
 	popup_request.connect(_on_canvas_popup)
 	end_node_move.connect(_on_end_node_move)
 
@@ -172,28 +183,33 @@ func _on_workspace_response(
 	for ed in edges_data:
 		var source_node_id: String = str(ed.get("source_node_id", ""))
 		var target_node_id: String = str(ed.get("target_node_id", ""))
-		var source_port_index := _port_index_named(
-			source_node_id,
-			"outputs",
-			str(ed.get("source_port_name", ""))
-		)
-		var target_port_index := _port_index_named(
-			target_node_id,
-			"inputs",
-			str(ed.get("target_port_name", ""))
-		)
-		if source_port_index >= 0 and target_port_index >= 0:
-			connect_node(source_node_id, source_port_index, target_node_id, target_port_index)
-
+		var source_port_name: String = str(ed.get("source_port_name", ""))
+		var target_port_name: String = str(ed.get("target_port_name", ""))
 		var edge_id: String = str(ed.get("id", ""))
+
 		_edge_data[edge_id] = {
 			"id": edge_id,
 			"semantic_type": str(ed.get("semantic_type", "text")),
 			"source_node_id": source_node_id,
-			"source_port_name": str(ed.get("source_port_name", "")),
+			"source_port_name": source_port_name,
 			"target_node_id": target_node_id,
-			"target_port_name": str(ed.get("target_port_name", "")),
+			"target_port_name": target_port_name,
 		}
+
+		var source_port_index := _port_index_named(
+			source_node_id,
+			"outputs",
+			source_port_name
+		)
+		var target_port_index := _port_index_named(
+			target_node_id,
+			"inputs",
+			target_port_name
+		)
+		if source_port_index >= 0 and target_port_index >= 0:
+			connect_node(source_node_id, source_port_index, target_node_id, target_port_index)
+
+	queue_redraw()
 
 	_suppress_editor_signals = false
 
@@ -448,6 +464,8 @@ func _on_canvas_popup(at_position: Vector2):
 	_pending_spawn_position = at_position
 	_context_node_id = ""
 	_popup_menu.clear()
+	_edge_menu_ids.clear()
+	_edge_delete_menu_ids.clear()
 	_popup_menu.add_item("Spawn Text Node", MENU_SPAWN_TEXT)
 	_popup_menu.add_item("Spawn File Source Node", MENU_SPAWN_FILE_SOURCE)
 	_popup_menu.add_item("Spawn Composite Node", MENU_SPAWN_COMPOSITE)
@@ -462,6 +480,8 @@ func _on_graph_node_input(event: InputEvent, node_id: String):
 		_context_node_id = node_id
 		var nd: Dictionary = _node_data.get(node_id, {})
 		_popup_menu.clear()
+		_edge_menu_ids.clear()
+		_edge_delete_menu_ids.clear()
 		_popup_menu.add_item("Cook Context", MENU_COOK)
 		if not nd.get("is_locked", false):
 			_popup_menu.add_item("Lock / Bake", MENU_LOCK)
@@ -470,15 +490,44 @@ func _on_graph_node_input(event: InputEvent, node_id: String):
 				_popup_menu.add_item("Add Input Port", MENU_ADD_COMPOSITE_INPUT)
 				_popup_menu.add_item("Edit Template", MENU_EDIT_COMPOSITE_TEMPLATE)
 
-		var edge_index: int = MENU_EDGE_FIRST
-		for key in _edge_data:
-			var ed: Dictionary = _edge_data[key]
-			if ed.get("source_node_id", "") == node_id:
-				var target_id: String = ed.get("target_node_id", "")
-				var etype: String = ed.get("semantic_type", "text")
-				var label: String = "Edge → " + target_id.get_slice("-", 1) + ": " + ("RED" if etype == "text" else "GREEN")
-				_popup_menu.add_item(label, edge_index)
-				edge_index += 1
+		_edge_menu_ids.clear()
+		_edge_delete_menu_ids.clear()
+		var edge_menu_id := MENU_EDGE_FIRST
+		var delete_menu_id := MENU_EDGE_DELETE_FIRST
+		for edge_id in _edge_data:
+			var edge: Dictionary = _edge_data[edge_id]
+			var source_id := str(edge.get("source_node_id", ""))
+			var target_id := str(edge.get("target_node_id", ""))
+			if source_id != node_id and target_id != node_id:
+				continue
+
+			var semantic_type := str(edge.get("semantic_type", "text"))
+			if semantic_type == "supersedes":
+				continue
+
+			var other_id := target_id if source_id == node_id else source_id
+			var other_label := other_id.get_slice("-", 1)
+			if other_label.is_empty():
+				other_label = other_id
+
+			if source_id == node_id:
+				if semantic_type == "text":
+					_popup_menu.add_item(
+						"Set Edge to Memory Consolidation (GREEN) -> " + other_label,
+						edge_menu_id
+					)
+				elif semantic_type == "memory_consolidation":
+					_popup_menu.add_item(
+						"Set Edge to Basic Text (RED) -> " + other_label,
+						edge_menu_id
+					)
+				_edge_menu_ids[edge_menu_id] = str(edge_id)
+				edge_menu_id += 1
+
+			var direction := " -> " if source_id == node_id else " <- "
+			_popup_menu.add_item("Disconnect Edge" + direction + other_label, delete_menu_id)
+			_edge_delete_menu_ids[delete_menu_id] = str(edge_id)
+			delete_menu_id += 1
 
 		_popup_menu.position = get_screen_position() + get_local_mouse_position()
 		_popup_menu.popup()
@@ -512,8 +561,10 @@ func _on_popup_action(id: int):
 			if _context_node_id != "":
 				_show_template_dialog(_context_node_id)
 		_:
-			if id >= MENU_EDGE_FIRST:
-				_toggle_edge_by_menu_index(_context_node_id, id - MENU_EDGE_FIRST)
+			if _edge_menu_ids.has(id):
+				_toggle_edge_from_menu(id)
+			elif _edge_delete_menu_ids.has(id):
+				_request_edge_deletion(str(_edge_delete_menu_ids[id]))
 
 
 func _spawn_new_node(at_position: Vector2):
@@ -833,6 +884,132 @@ func _port_index_named(node_id: String, collection: String, port_name: String) -
 	return -1
 
 
+func _edge_for_connection(
+	from_node: StringName,
+	from_port: int,
+	to_node: StringName,
+	to_port: int
+) -> Dictionary:
+	var source_node_id := str(from_node)
+	var target_node_id := str(to_node)
+	var source_port_name := _port_name_at(source_node_id, "outputs", from_port)
+	var target_port_name := _port_name_at(target_node_id, "inputs", to_port)
+	var supersedes_edge: Dictionary = {}
+
+	for edge_id in _edge_data:
+		var edge: Dictionary = _edge_data[edge_id]
+		if str(edge.get("source_node_id", "")) != source_node_id:
+			continue
+		if str(edge.get("source_port_name", "")) != source_port_name:
+			continue
+		if str(edge.get("target_node_id", "")) != target_node_id:
+			continue
+		if str(edge.get("target_port_name", "")) != target_port_name:
+			continue
+		if str(edge.get("semantic_type", "text")) != "supersedes":
+			return edge
+		supersedes_edge = edge
+
+	return supersedes_edge
+
+
+func _draw() -> void:
+	for connection in get_connection_list():
+		var from_node := StringName(connection.get("from_node", ""))
+		var from_port := int(connection.get("from_port", -1))
+		var to_node := StringName(connection.get("to_node", ""))
+		var to_port := int(connection.get("to_port", -1))
+		if from_port < 0 or to_port < 0:
+			continue
+
+		var edge := _edge_for_connection(from_node, from_port, to_node, to_port)
+		if edge.is_empty():
+			continue
+
+		var from_graph_node: GraphNode = get_node_or_null(NodePath(str(from_node)))
+		var to_graph_node: GraphNode = get_node_or_null(NodePath(str(to_node)))
+		if from_graph_node == null or to_graph_node == null:
+			continue
+
+		var from_position: Vector2 = (
+			from_graph_node.position
+			+ from_graph_node.get_output_port_position(from_port)
+		)
+		var to_position: Vector2 = (
+			to_graph_node.position
+			+ to_graph_node.get_input_port_position(to_port)
+		)
+		_draw_semantic_connection(
+			from_position,
+			to_position,
+			str(edge.get("semantic_type", "text"))
+		)
+
+
+func _draw_semantic_connection(
+	from_position: Vector2,
+	to_position: Vector2,
+	semantic_type: String
+) -> void:
+	var control_distance := maxf(absf(to_position.x - from_position.x) * 0.5, 80.0)
+	var curve := Curve2D.new()
+	curve.add_point(
+		from_position,
+		Vector2.ZERO,
+		Vector2(control_distance, 0.0)
+	)
+	curve.add_point(
+		to_position,
+		Vector2(-control_distance, 0.0),
+		Vector2.ZERO
+	)
+	var points := curve.tessellate(5, 4.0)
+
+	match semantic_type:
+		"text":
+			_draw_dashed_curve(points, Color(0.8, 0.2, 0.2), TEXT_EDGE_WIDTH)
+		"memory_consolidation":
+			for point_index in range(points.size() - 1):
+				draw_line(
+					points[point_index],
+					points[point_index + 1],
+					Color(0.2, 0.8, 0.2),
+					MEMORY_EDGE_WIDTH,
+					true
+				)
+
+
+func _draw_dashed_curve(
+	points: PackedVector2Array,
+	color: Color,
+	width: float
+) -> void:
+	var draw_dash := true
+	for point_index in range(points.size() - 1):
+		var segment_start := points[point_index]
+		var segment_end := points[point_index + 1]
+		var segment_length := segment_start.distance_to(segment_end)
+		if is_zero_approx(segment_length):
+			continue
+
+		var segment_offset := 0.0
+		while segment_offset < segment_length:
+			var next_offset := minf(
+				segment_offset + TEXT_EDGE_DASH_LENGTH,
+				segment_length
+			)
+			if draw_dash:
+				draw_line(
+					segment_start.lerp(segment_end, segment_offset / segment_length),
+					segment_start.lerp(segment_end, next_offset / segment_length),
+					color,
+					width,
+					true
+				)
+			draw_dash = not draw_dash
+			segment_offset = next_offset
+
+
 func _on_connection_request(from_node: StringName, from_port: int, to_node: StringName, to_port: int):
 	var source_node_id := str(from_node)
 	var target_node_id := str(to_node)
@@ -851,6 +1028,70 @@ func _on_connection_request(from_node: StringName, from_port: int, to_node: Stri
 	})
 	var headers = ["Content-Type: application/json"]
 	_send_api_request(BACKEND_URL + "/edges", headers, HTTPClient.METHOD_POST, body, _on_edge_created)
+
+
+func _on_disconnection_request(from_node: StringName, from_port: int, to_node: StringName, to_port: int):
+	var edge := _edge_for_connection(from_node, from_port, to_node, to_port)
+	if edge.is_empty():
+		return
+	if str(edge.get("semantic_type", "text")) == "supersedes":
+		return
+	_request_edge_deletion(str(edge.get("id", "")))
+
+
+func _request_edge_deletion(edge_id: String) -> void:
+	if not _edge_data.has(edge_id):
+		return
+	var edge: Dictionary = _edge_data[edge_id]
+	if str(edge.get("semantic_type", "text")) == "supersedes":
+		print("[Tendril] Supersedes edge ", edge_id, " is immutable; deletion rejected")
+		return
+
+	var from_node := StringName(str(edge.get("source_node_id", "")))
+	var from_port := _port_index_named(
+		str(from_node),
+		"outputs",
+		str(edge.get("source_port_name", ""))
+	)
+	var to_node := StringName(str(edge.get("target_node_id", "")))
+	var to_port := _port_index_named(
+		str(to_node),
+		"inputs",
+		str(edge.get("target_port_name", ""))
+	)
+
+	var revision := _next_edge_revision(edge_id)
+	_send_api_request(
+		BACKEND_URL + "/edges/" + edge_id,
+		[],
+		HTTPClient.METHOD_DELETE,
+		"",
+		_on_edge_deleted.bind(edge_id, revision, from_node, from_port, to_node, to_port)
+	)
+
+
+func _on_edge_deleted(
+	result: int,
+	response_code: int,
+	headers: PackedStringArray,
+	body: PackedByteArray,
+	edge_id: String,
+	revision: int,
+	from_node: StringName,
+	from_port: int,
+	to_node: StringName,
+	to_port: int
+) -> void:
+	if not _is_current_edge_revision(edge_id, revision):
+		return
+	if _request_failed(result, response_code):
+		_show_request_error("Edge deletion", result, response_code, body)
+		return
+
+	if from_port >= 0 and to_port >= 0 and is_node_connected(from_node, from_port, to_node, to_port):
+		disconnect_node(from_node, from_port, to_node, to_port)
+	_edge_data.erase(edge_id)
+	queue_redraw()
 
 
 func _on_edge_created(result, response_code, headers, body):
@@ -888,17 +1129,19 @@ func _on_lock_response(result: int, response_code: int, headers: PackedStringArr
 	_apply_locked_style(node_id)
 
 
-func _toggle_edge_by_menu_index(source_node_id: String, menu_index: int):
-	var idx: int = 0
-	for key in _edge_data:
-		var ed: Dictionary = _edge_data[key]
-		if ed.get("source_node_id", "") == source_node_id:
-			if idx == menu_index:
-				var etype: String = ed.get("semantic_type", "text")
-				var new_type: String = "memory_consolidation" if etype == "text" else "text"
-				_toggle_edge_type(ed.get("id", ""), new_type)
-				return
-			idx += 1
+func _toggle_edge_from_menu(menu_id: int) -> void:
+	var edge_id := str(_edge_menu_ids.get(menu_id, ""))
+	var edge: Dictionary = _edge_data.get(edge_id, {})
+	if edge.is_empty():
+		return
+
+	var semantic_type := str(edge.get("semantic_type", "text"))
+	var new_semantic_type := (
+		"memory_consolidation"
+		if semantic_type == "text"
+		else "text"
+	)
+	_toggle_edge_type(edge_id, new_semantic_type)
 
 
 func _toggle_edge_type(edge_id: String, new_semantic_type: String) -> void:
@@ -914,17 +1157,34 @@ func _toggle_edge_type(edge_id: String, new_semantic_type: String) -> void:
 	)
 
 
-func _on_edge_toggle_response(result: int, response_code: int, headers: PackedStringArray, body: PackedByteArray, edge_id: String, revision: int) -> void:
+func _on_edge_toggle_response(
+	result: int,
+	response_code: int,
+	headers: PackedStringArray,
+	body: PackedByteArray,
+	edge_id: String,
+	revision: int
+) -> void:
 	if not _is_current_edge_revision(edge_id, revision):
 		return
 	if _request_failed(result, response_code):
 		_show_request_error("Edge semantic update", result, response_code, body)
 		return
+
 	var response_edge = JSON.parse_string(body.get_string_from_utf8())
-	if not response_edge is Dictionary:
+	if not response_edge is Dictionary or str(response_edge.get("id", "")) != edge_id:
 		fetch_workspace()
 		return
-	_edge_data[edge_id] = response_edge.duplicate(true)
+
+	_edge_data[edge_id] = {
+		"id": edge_id,
+		"semantic_type": str(response_edge.get("semantic_type", "text")),
+		"source_node_id": str(response_edge.get("source_node_id", "")),
+		"source_port_name": str(response_edge.get("source_port_name", "")),
+		"target_node_id": str(response_edge.get("target_node_id", "")),
+		"target_port_name": str(response_edge.get("target_port_name", "")),
+	}
+	queue_redraw()
 
 
 func _fork_node(node_id: String):
