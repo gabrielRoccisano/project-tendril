@@ -296,7 +296,7 @@ func _on_workspace_response(result, response_code, headers, body):
 		var key: String = source_node_id + "|" + target_node_id
 		_edge_data[key] = {
 			"id": edge_id,
-			"semantic_type": str(ed.get("semantic_type", "narrative_context")),
+			"semantic_type": str(ed.get("semantic_type", "text")),
 			"source_node_id": source_node_id,
 			"target_node_id": target_node_id,
 		}
@@ -348,8 +348,8 @@ func _on_graph_node_input(event: InputEvent, node_id: String):
 			var ed: Dictionary = _edge_data[key]
 			if ed.get("source_node_id", "") == node_id:
 				var target_id: String = ed.get("target_node_id", "")
-				var etype: String = ed.get("semantic_type", "narrative_context")
-				var label: String = "Edge → " + target_id.get_slice("-", 1) + ": " + ("RED" if etype == "narrative_context" else "GREEN")
+				var etype: String = ed.get("semantic_type", "text")
+				var label: String = "Edge → " + target_id.get_slice("-", 1) + ": " + ("RED" if etype == "text" else "GREEN")
 				_popup_menu.add_item(label, edge_index)
 				edge_index += 1
 
@@ -724,7 +724,7 @@ func _on_connection_request(from_node: StringName, from_port: int, to_node: Stri
 		"source_port_name": source_port_name,
 		"target_node_id": target_node_id,
 		"target_port_name": target_port_name,
-		"semantic_type": "narrative_context",
+		"semantic_type": "text",
 	})
 	var headers = ["Content-Type: application/json"]
 	_send_api_request(BACKEND_URL + "/edges", headers, HTTPClient.METHOD_POST, body, _on_edge_created)
@@ -768,8 +768,8 @@ func _toggle_edge_by_menu_index(source_node_id: String, menu_index: int):
 		var ed: Dictionary = _edge_data[key]
 		if ed.get("source_node_id", "") == source_node_id:
 			if idx == menu_index:
-				var etype: String = ed.get("semantic_type", "narrative_context")
-				var new_type: String = "stable_reference" if etype == "narrative_context" else "narrative_context"
+				var etype: String = ed.get("semantic_type", "text")
+				var new_type: String = "memory_consolidation" if etype == "text" else "text"
 				_toggle_edge_type(ed.get("id", ""), new_type)
 				return
 			idx += 1
@@ -895,7 +895,7 @@ func _on_monitor_created(result, response_code, headers, body):
 			"source_port_name": source_port_name,
 			"target_node_id": str(json.get("id", "")),
 			"target_port_name": "text_in",
-			"semantic_type": "narrative_context"
+			"semantic_type": "text"
 		})
 		var req_headers = ["Content-Type: application/json"]
 		_send_api_request(BACKEND_URL + "/edges", req_headers, HTTPClient.METHOD_POST, edge_body, _on_edge_created)
