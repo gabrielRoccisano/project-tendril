@@ -21,7 +21,7 @@ Read:
 - <current-code-file-1>
 - <current-code-file-2>
 
-Modify exactly:
+Modify/Create exactly:
 - <authorized-file-1>
 - <authorized-file-2>
 
