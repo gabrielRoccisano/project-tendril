@@ -107,6 +107,12 @@ class GraphStore:
             patch_data = patch.copy()
             if "position" in patch_data:
                 merged.position = Position3D.model_validate(patch_data.pop("position"))
+            if "inputs" in patch_data:
+                merged.inputs = [Port.model_validate(port) for port in patch_data.pop("inputs")]
+            if "outputs" in patch_data:
+                merged.outputs = [Port.model_validate(port) for port in patch_data.pop("outputs")]
+            if "properties" in patch_data:
+                merged.properties = NodeProperties.model_validate(patch_data.pop("properties"))
 
             for field, value in patch_data.items():
                 setattr(merged, field, value)
@@ -123,9 +129,9 @@ class GraphStore:
                     raise ValueError(f"Node {node_id} is locked or not found")
         return merged
 
-    def add_edge(self, edge: Edge) -> Edge:
-        if edge.semantic_type == "supersedes":
-            raise ValueError("Supersedes edges can only be created by fork_node")
+    def add_edge(self, edge: Edge, allow_supersedes: bool = False) -> Edge:
+        if edge.semantic_type == "supersedes" and not allow_supersedes:
+            raise ValueError("Supersedes edges can only be created by workspace import")
         if not edge.id:
             edge.id = str(uuid.uuid4())
 
@@ -188,6 +194,48 @@ class GraphStore:
                 "SELECT * FROM edges WHERE id = ?", (edge_id,)
             ).fetchone()
         return self._row_to_edge(updated)
+
+    def delete_edge(self, edge_id: str) -> Edge:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM edges WHERE id = ?", (edge_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Edge {edge_id} not found")
+            edge = self._row_to_edge(row)
+            if edge.semantic_type == "supersedes":
+                raise ValueError(
+                    "Supersedes edges are immutable provenance and cannot be deleted"
+                )
+            with conn:
+                conn.execute("DELETE FROM edges WHERE id = ?", (edge_id,))
+        return edge
+
+    def delete_node(self, node_id: str) -> Node:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM nodes WHERE id = ?", (node_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Node {node_id} not found")
+
+            node = self._row_to_node(row)
+            with conn:
+                conn.execute(
+                    "DELETE FROM edges WHERE source_node_id = ? OR target_node_id = ?",
+                    (node_id, node_id),
+                )
+                conn.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
+        return node
+
+    def clear_workspace(self) -> dict[str, int]:
+        with self._connection() as conn:
+            node_count = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+            edge_count = conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+            with conn:
+                conn.execute("DELETE FROM edges")
+                conn.execute("DELETE FROM nodes")
+        return {"deleted_nodes": node_count, "deleted_edges": edge_count}
 
     def get_workspace(self) -> dict:
         with self._connection() as conn:

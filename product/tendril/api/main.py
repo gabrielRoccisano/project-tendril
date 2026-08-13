@@ -49,6 +49,14 @@ async def update_node(node_id: str, node: NodePatch) -> Node:
         raise HTTPException(status_code=409, detail=str(e))
 
 
+@app.delete("/nodes/{node_id}")
+async def delete_node(node_id: str) -> Node:
+    try:
+        return store.delete_node(node_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="node not found")
+
+
 @app.post("/edges", status_code=201)
 async def create_edge(edge: Edge) -> Edge:
     try:
@@ -80,9 +88,32 @@ async def get_workspace():
     return store.get_workspace()
 
 
+@app.delete("/workspace")
+async def clear_workspace() -> dict[str, int]:
+    return store.clear_workspace()
+
+
+@app.post("/workspace/edges", status_code=201)
+async def import_workspace_edge(edge: Edge) -> Edge:
+    try:
+        return store.add_edge(edge, allow_supersedes=True)
+    except (KeyError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.patch("/edges/{edge_id}")
 async def update_edge(edge_id: str, edge: Edge) -> Edge:
     try:
         return store.update_edge(edge_id, edge)
     except KeyError:
         raise HTTPException(status_code=404, detail="edge not found")
+
+
+@app.delete("/edges/{edge_id}")
+async def delete_edge(edge_id: str) -> Edge:
+    try:
+        return store.delete_edge(edge_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="edge not found")
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))

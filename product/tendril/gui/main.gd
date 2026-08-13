@@ -10,6 +10,10 @@ const MENU_ADD_COMPOSITE_INPUT := 4
 const MENU_EDIT_COMPOSITE_TEMPLATE := 5
 const MENU_SPAWN_FILE_SOURCE := 6
 const MENU_CLEAR_HIGHLIGHTS := 7
+const MENU_DELETE_NODE := 8
+const FILE_NEW := 0
+const FILE_SAVE_AS := 1
+const FILE_OPEN := 2
 const MENU_EDGE_FIRST := 100
 const MENU_EDGE_DELETE_FIRST := 200
 const TEXT_EDGE_COLOR := Color(0.8, 0.2, 0.2)
@@ -47,8 +51,16 @@ var _suppress_editor_signals := false
 var _composite_mutation_queues: Dictionary = {}
 var _composite_mutation_active: Dictionary = {}
 
+@onready var _file_popup: PopupMenu = $TopMenuBar/File
+@onready var _save_dialog: FileDialog = $SaveDialog
+@onready var _open_dialog: FileDialog = $OpenDialog
+var _pending_save_path := ""
+var _pending_load_nodes: Array = []
+var _pending_load_edges: Array = []
+var _pending_load_index := 0
 
-func _ready():
+
+func _ready() -> void:
 	add_theme_color_override("connection_color", Color(0, 0, 0, 0))
 	right_disconnects = true
 	_popup_menu = PopupMenu.new()
@@ -57,12 +69,14 @@ func _ready():
 	add_child(_popup_menu)
 
 	_setup_composite_dialogs()
+	_file_popup.id_pressed.connect(_on_file_menu_action)
+	_save_dialog.file_selected.connect(_on_save_file_selected)
+	_open_dialog.file_selected.connect(_on_open_file_selected)
 
 	connection_request.connect(_on_connection_request)
 	disconnection_request.connect(_on_disconnection_request)
 	popup_request.connect(_on_canvas_popup)
 	end_node_move.connect(_on_end_node_move)
-
 	fetch_workspace()
 
 
@@ -235,8 +249,22 @@ func _setup_composite_dialogs():
 	_template_dialog.confirmed.connect(_on_template_confirmed)
 
 
+func _on_file_menu_action(id: int) -> void:
+	match id:
+		FILE_NEW:
+			_new_workspace()
+		FILE_SAVE_AS:
+			_save_dialog.popup_centered_ratio(0.75)
+		FILE_OPEN:
+			_open_dialog.popup_centered_ratio(0.75)
+
+
 func _clear_graph() -> void:
 	_pending_position_saves.clear()
+	_node_revisions.clear()
+	_edge_revisions.clear()
+	_composite_mutation_queues.clear()
+	_composite_mutation_active.clear()
 	_suppress_editor_signals = true
 	for child in get_children():
 		if child is GraphNode:
@@ -249,6 +277,7 @@ func _clear_graph() -> void:
 	_graphnodes.clear()
 	_edge_data.clear()
 	_suppress_editor_signals = false
+	queue_redraw()
 
 
 func _connect_once(signal_object: Signal, callback: Callable) -> void:
@@ -293,15 +322,19 @@ func _spawn_graph_node(node_dict: Dictionary):
 
 	var port_color: Color = Color(0.2, 0.8, 0.2) if is_locked else Color(0.8, 0.2, 0.2)
 	if ntype == "composite_text":
-		var output_row = Label.new()
-		output_row.text = "combined_text"
-		output_row.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		var output_row := Label.new()
+		var first_input_name := str(inputs[0].get("name", "")) if not inputs.is_empty() else "text_in"
+		output_row.text = first_input_name + "                       combined_text"
 		output_row.custom_minimum_size = Vector2(200, 28)
 		gn.add_child(output_row)
-		gn.set_slot(0, false, 0, Color.WHITE, true, 0, port_color, null, null)
+		gn.set_slot(0, true, 0, Color.WHITE, true, 0, port_color, null, null)
 
-		for port in inputs:
-			_add_composite_input_row_to_graph_node(gn, str(port.get("name", "")), port_color)
+		for input_index in range(1, inputs.size()):
+			_add_composite_input_row_to_graph_node(
+				gn,
+				str(inputs[input_index].get("name", "")),
+				port_color
+			)
 	elif ntype == "file_source":
 		var path_edit = LineEdit.new()
 		path_edit.text = content
@@ -385,8 +418,22 @@ func _rebuild_composite_input_rows(node_id: String) -> void:
 			child.queue_free()
 
 	var port_color: Color = Color(0.2, 0.8, 0.2) if nd.get("is_locked", false) else Color(0.8, 0.2, 0.2)
-	for port in confirmed_inputs:
-		_add_composite_input_row_to_graph_node(gn, str(port.get("name", "")), port_color)
+	var output_row: Label = gn.get_child(0) as Label
+	var has_first_input := not confirmed_inputs.is_empty()
+	var first_input_name := (
+		str(confirmed_inputs[0].get("name", ""))
+		if has_first_input
+		else "text_in"
+	)
+	output_row.text = first_input_name + "                       combined_text"
+	gn.set_slot(0, has_first_input, 0, port_color, true, 0, port_color, null, null)
+
+	for input_index in range(1, confirmed_inputs.size()):
+		_add_composite_input_row_to_graph_node(
+			gn,
+			str(confirmed_inputs[input_index].get("name", "")),
+			port_color
+		)
 
 	gn.size.y = maxf(150.0, 90.0 + float(confirmed_inputs.size()) * 28.0)
 
@@ -431,7 +478,7 @@ func _apply_locked_style(node_id: String):
 	if nd.get("type", "") == "composite_text":
 		var inputs: Array = nd.get("inputs", [])
 		for input_index in range(inputs.size()):
-			gn.set_slot_color_left(input_index + 1, Color(0.2, 0.8, 0.2))
+			gn.set_slot_color_left(input_index, Color(0.2, 0.8, 0.2))
 
 
 func _title_for_type(ntype: String) -> String:
@@ -489,6 +536,9 @@ func _on_graph_node_input(event: InputEvent, node_id: String):
 				_popup_menu.add_separator()
 				_popup_menu.add_item("Add Input Port", MENU_ADD_COMPOSITE_INPUT)
 				_popup_menu.add_item("Edit Template", MENU_EDIT_COMPOSITE_TEMPLATE)
+
+		_popup_menu.add_separator()
+		_popup_menu.add_item("Delete Node", MENU_DELETE_NODE)
 
 		_edge_menu_ids.clear()
 		_edge_delete_menu_ids.clear()
@@ -560,6 +610,9 @@ func _on_popup_action(id: int):
 		MENU_EDIT_COMPOSITE_TEMPLATE:
 			if _context_node_id != "":
 				_show_template_dialog(_context_node_id)
+		MENU_DELETE_NODE:
+			if not _context_node_id.is_empty():
+				_request_node_deletion(_context_node_id)
 		_:
 			if _edge_menu_ids.has(id):
 				_toggle_edge_from_menu(id)
@@ -591,14 +644,14 @@ func _spawn_new_file_source_node(at_position: Vector2):
 	_send_api_request(BACKEND_URL + "/nodes", headers, HTTPClient.METHOD_POST, body, _on_node_created)
 
 
-func _spawn_new_composite_node(at_position: Vector2):
+func _spawn_new_composite_node(at_position: Vector2) -> void:
 	var body = JSON.stringify({
 		"type": "composite_text",
 		"content": "",
 		"position": {"x": at_position.x, "y": at_position.y, "z": 0.0},
-		"inputs": [],
+		"inputs": [{"name": "text_in"}],
 		"outputs": [{"name": "combined_text"}],
-		"properties": {"template": ""},
+		"properties": {"template": "{{text_in}}"},
 	})
 	var headers = ["Content-Type: application/json"]
 	_send_api_request(BACKEND_URL + "/nodes", headers, HTTPClient.METHOD_POST, body, _on_node_created)
@@ -1046,6 +1099,52 @@ func _on_disconnection_request(from_node: StringName, from_port: int, to_node: S
 	_request_edge_deletion(edge_id, from_node, from_port, to_node, to_port)
 
 
+func _request_node_deletion(node_id: String) -> void:
+	if not _graphnodes.has(node_id):
+		return
+	_send_api_request(
+		BACKEND_URL + "/nodes/" + node_id.uri_encode(),
+		[],
+		HTTPClient.METHOD_DELETE,
+		"",
+		_on_node_deleted.bind(node_id)
+	)
+
+
+func _on_node_deleted(
+	result: int,
+	response_code: int,
+	headers: PackedStringArray,
+	body: PackedByteArray,
+	node_id: String
+) -> void:
+	if _request_failed(result, response_code):
+		_show_request_error("Node deletion", result, response_code, body)
+		return
+
+	var graph_node: GraphNode = _graphnodes.get(node_id)
+	if graph_node != null:
+		_disconnect_node_signals(graph_node)
+		graph_node.queue_free()
+
+	for edge_id in _edge_data.keys():
+		var edge: Dictionary = _edge_data[edge_id]
+		if str(edge.get("source_node_id", "")) == node_id or str(edge.get("target_node_id", "")) == node_id:
+			_edge_data.erase(edge_id)
+			_edge_revisions.erase(edge_id)
+
+	_node_data.erase(node_id)
+	_textedits.erase(node_id)
+	_lineedits.erase(node_id)
+	_graphnodes.erase(node_id)
+	_node_revisions.erase(node_id)
+	_pending_position_saves.erase(node_id)
+	_composite_mutation_queues.erase(node_id)
+	_composite_mutation_active.erase(node_id)
+	_context_node_id = ""
+	queue_redraw()
+
+
 func _request_edge_deletion(
 	edge_id: String,
 	from_node: StringName = &"",
@@ -1113,6 +1212,214 @@ func _on_edge_created(result, response_code, headers, body):
 		print("[Tendril] Edge creation failed: ", response_code, " - ", body.get_string_from_utf8())
 		return
 	fetch_workspace()
+
+
+func _new_workspace() -> void:
+	_send_api_request(
+		BACKEND_URL + "/workspace",
+		[],
+		HTTPClient.METHOD_DELETE,
+		"",
+		_on_new_workspace_cleared
+	)
+
+
+func _on_new_workspace_cleared(
+	result: int,
+	response_code: int,
+	headers: PackedStringArray,
+	body: PackedByteArray
+) -> void:
+	if _request_failed(result, response_code):
+		_show_request_error("New workspace", result, response_code, body)
+		return
+	_clear_graph()
+	queue_redraw()
+
+
+func _on_save_file_selected(path: String) -> void:
+	_pending_save_path = path
+	if not _pending_save_path.ends_with(".tendril.json"):
+		_pending_save_path += ".tendril.json"
+	_send_api_request(
+		BACKEND_URL + "/workspace",
+		[],
+		HTTPClient.METHOD_GET,
+		"",
+		_on_workspace_ready_to_save
+	)
+
+
+func _on_workspace_ready_to_save(
+	result: int,
+	response_code: int,
+	headers: PackedStringArray,
+	body: PackedByteArray
+) -> void:
+	if _request_failed(result, response_code):
+		_show_request_error("Save workspace", result, response_code, body)
+		_pending_save_path = ""
+		return
+
+	var workspace = JSON.parse_string(body.get_string_from_utf8())
+	if not workspace is Dictionary:
+		_show_request_error("Save workspace", HTTPRequest.RESULT_SUCCESS, 500, body)
+		_pending_save_path = ""
+		return
+
+	var file := FileAccess.open(_pending_save_path, FileAccess.WRITE)
+	if file == null:
+		_show_local_file_error("Save workspace", FileAccess.get_open_error())
+		_pending_save_path = ""
+		return
+	file.store_string(JSON.stringify(workspace, "\t"))
+	file.close()
+	_pending_save_path = ""
+
+
+func _show_local_file_error(operation: String, error: Error) -> void:
+	var dialog := AcceptDialog.new()
+	dialog.title = operation + " failed"
+	dialog.dialog_text = error_string(error)
+	add_child(dialog)
+	dialog.confirmed.connect(dialog.queue_free, CONNECT_ONE_SHOT)
+	dialog.canceled.connect(dialog.queue_free, CONNECT_ONE_SHOT)
+	dialog.popup_centered()
+
+
+func _on_open_file_selected(path: String) -> void:
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		_show_local_file_error("Open workspace", FileAccess.get_open_error())
+		return
+
+	var parsed = JSON.parse_string(file.get_as_text())
+	file.close()
+	if not parsed is Dictionary or not parsed.get("nodes", null) is Array or not parsed.get("edges", null) is Array:
+		_show_invalid_graph_file()
+		return
+
+	_pending_load_nodes = parsed["nodes"].duplicate(true)
+	_pending_load_edges = parsed["edges"].duplicate(true)
+	_pending_load_index = 0
+	_send_api_request(
+		BACKEND_URL + "/workspace",
+		[],
+		HTTPClient.METHOD_DELETE,
+		"",
+		_on_open_workspace_cleared
+	)
+
+
+func _show_invalid_graph_file() -> void:
+	var dialog := AcceptDialog.new()
+	dialog.title = "Load workspace failed"
+	dialog.dialog_text = "The selected file is not a Tendril workspace."
+	add_child(dialog)
+	dialog.confirmed.connect(dialog.queue_free, CONNECT_ONE_SHOT)
+	dialog.canceled.connect(dialog.queue_free, CONNECT_ONE_SHOT)
+	dialog.popup_centered()
+
+
+func _on_open_workspace_cleared(
+	result: int,
+	response_code: int,
+	headers: PackedStringArray,
+	body: PackedByteArray
+) -> void:
+	if _request_failed(result, response_code):
+		_show_request_error("Open workspace", result, response_code, body)
+		_reset_pending_load()
+		return
+	_clear_graph()
+	_pending_load_index = 0
+	_load_next_node()
+
+
+func _load_next_node() -> void:
+	if _pending_load_index >= _pending_load_nodes.size():
+		_pending_load_index = 0
+		_load_next_edge()
+		return
+
+	var node = _pending_load_nodes[_pending_load_index]
+	if not node is Dictionary:
+		_abort_load("Loaded node is not an object.")
+		return
+	_send_api_request(
+		BACKEND_URL + "/nodes",
+		["Content-Type: application/json"],
+		HTTPClient.METHOD_POST,
+		JSON.stringify(node),
+		_on_load_node_created
+	)
+
+
+func _on_load_node_created(
+	result: int,
+	response_code: int,
+	headers: PackedStringArray,
+	body: PackedByteArray
+) -> void:
+	if _request_failed(result, response_code):
+		_show_request_error("Open node", result, response_code, body)
+		_reset_pending_load()
+		fetch_workspace()
+		return
+	_pending_load_index += 1
+	_load_next_node()
+
+
+func _load_next_edge() -> void:
+	if _pending_load_index >= _pending_load_edges.size():
+		_reset_pending_load()
+		fetch_workspace()
+		return
+
+	var edge = _pending_load_edges[_pending_load_index]
+	if not edge is Dictionary:
+		_abort_load("Loaded edge is not an object.")
+		return
+	_send_api_request(
+		BACKEND_URL + "/workspace/edges",
+		["Content-Type: application/json"],
+		HTTPClient.METHOD_POST,
+		JSON.stringify(edge),
+		_on_load_edge_created
+	)
+
+
+func _on_load_edge_created(
+	result: int,
+	response_code: int,
+	headers: PackedStringArray,
+	body: PackedByteArray
+) -> void:
+	if _request_failed(result, response_code):
+		_show_request_error("Open edge", result, response_code, body)
+		_reset_pending_load()
+		fetch_workspace()
+		return
+	_pending_load_index += 1
+	_load_next_edge()
+
+
+func _abort_load(message: String) -> void:
+	var dialog := AcceptDialog.new()
+	dialog.title = "Load workspace failed"
+	dialog.dialog_text = message
+	add_child(dialog)
+	dialog.confirmed.connect(dialog.queue_free, CONNECT_ONE_SHOT)
+	dialog.canceled.connect(dialog.queue_free, CONNECT_ONE_SHOT)
+	dialog.popup_centered()
+	_reset_pending_load()
+	fetch_workspace()
+
+
+func _reset_pending_load() -> void:
+	_pending_load_nodes.clear()
+	_pending_load_edges.clear()
+	_pending_load_index = 0
 
 
 func _lock_node(node_id: String) -> void:
