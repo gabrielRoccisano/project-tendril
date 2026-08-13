@@ -51,9 +51,9 @@ var _suppress_editor_signals := false
 var _composite_mutation_queues: Dictionary = {}
 var _composite_mutation_active: Dictionary = {}
 
-@onready var _file_popup: PopupMenu = $TopMenuBar/File
-@onready var _save_dialog: FileDialog = $SaveDialog
-@onready var _open_dialog: FileDialog = $OpenDialog
+@onready var _file_popup: PopupMenu = %File
+@onready var _save_dialog: FileDialog = %SaveDialog
+@onready var _open_dialog: FileDialog = %OpenDialog
 var _pending_save_path := ""
 var _pending_load_nodes: Array = []
 var _pending_load_edges: Array = []
@@ -77,7 +77,7 @@ func _ready() -> void:
 	disconnection_request.connect(_on_disconnection_request)
 	popup_request.connect(_on_canvas_popup)
 	end_node_move.connect(_on_end_node_move)
-	fetch_workspace()
+	_new_workspace()
 
 
 func _next_node_revision(node_id: String) -> int:
