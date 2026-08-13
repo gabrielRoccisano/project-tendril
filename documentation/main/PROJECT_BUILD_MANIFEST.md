@@ -50,6 +50,16 @@ The immediate focus is building the minimal Tendril backend API and GUI. The Ont
 
 Tech stack locked: Godot 4 (native client, V0 2D, V1 3D upgrade path) + Python FastAPI (headless DAG execution engine). See `documentation/drafts/proposed-main/architecture/tendril-v0-architecture.md` for the full V0 architecture and implementation plan.
 
+### V1 Architectural Boundary: Rust Canonical Core
+
+The current Python/FastAPI backend is the V0 Prototype, used for rapid semantic iteration.
+
+The eventual architecture target is a Rust Canonical Core that owns all graph semantics, provenance, and state.
+
+Godot remains a safe, replaceable projection layer and will survive the V1 migration.
+
+This boundary is logged as Architectural Debt to prevent the Python prototype from becoming permanent by inertia.
+
 ---
 
 # 2. Authority and Drift Rule
