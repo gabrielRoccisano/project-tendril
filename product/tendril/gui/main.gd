@@ -1034,12 +1034,25 @@ func _on_disconnection_request(from_node: StringName, from_port: int, to_node: S
 	var edge := _edge_for_connection(from_node, from_port, to_node, to_port)
 	if edge.is_empty():
 		return
-	if str(edge.get("semantic_type", "text")) == "supersedes":
+	var semantic_type := str(edge.get("semantic_type", ""))
+	if semantic_type == "supersedes":
 		return
-	_request_edge_deletion(str(edge.get("id", "")))
+	if semantic_type != "text" and semantic_type != "memory_consolidation":
+		return
+
+	var edge_id := str(edge.get("id", ""))
+	if edge_id.is_empty():
+		return
+	_request_edge_deletion(edge_id, from_node, from_port, to_node, to_port)
 
 
-func _request_edge_deletion(edge_id: String) -> void:
+func _request_edge_deletion(
+	edge_id: String,
+	from_node: StringName = &"",
+	from_port: int = -1,
+	to_node: StringName = &"",
+	to_port: int = -1
+) -> void:
 	if not _edge_data.has(edge_id):
 		return
 	var edge: Dictionary = _edge_data[edge_id]
@@ -1047,18 +1060,19 @@ func _request_edge_deletion(edge_id: String) -> void:
 		print("[Tendril] Supersedes edge ", edge_id, " is immutable; deletion rejected")
 		return
 
-	var from_node := StringName(str(edge.get("source_node_id", "")))
-	var from_port := _port_index_named(
-		str(from_node),
-		"outputs",
-		str(edge.get("source_port_name", ""))
-	)
-	var to_node := StringName(str(edge.get("target_node_id", "")))
-	var to_port := _port_index_named(
-		str(to_node),
-		"inputs",
-		str(edge.get("target_port_name", ""))
-	)
+	if from_port < 0 or to_port < 0:
+		from_node = StringName(str(edge.get("source_node_id", "")))
+		from_port = _port_index_named(
+			str(from_node),
+			"outputs",
+			str(edge.get("source_port_name", ""))
+		)
+		to_node = StringName(str(edge.get("target_node_id", "")))
+		to_port = _port_index_named(
+			str(to_node),
+			"inputs",
+			str(edge.get("target_port_name", ""))
+		)
 
 	var revision := _next_edge_revision(edge_id)
 	_send_api_request(
